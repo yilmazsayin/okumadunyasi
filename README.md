@@ -1,1 +1,1 @@
-Site linki [Coffely](https://okumadunyasi.vercel.app/)
+Site linki [Okuma Dünyası](https://okumadunyasi.vercel.app/)
