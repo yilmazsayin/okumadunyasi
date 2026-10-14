@@ -25,6 +25,7 @@ export function initApp(doc = document, win = window) {
     const get = id => doc.getElementById(id);
     const startButton = get('baslatBtn');
     const resetButton = get('resetReadingBtn');
+    const finishButton = get('finishReadingBtn');
     const readingArea = get('okuma-alani');
     const status = get('durum');
     const fileInput = get('file-input');
@@ -36,6 +37,7 @@ export function initApp(doc = document, win = window) {
     const modal = get('sonucModal');
     const closeButton = get('modalKapatBtn');
     const retryIncorrect = get('retryIncorrectBtn');
+    const restartButton = get('restartReadingBtn');
     const Recognition = win.SpeechRecognition || win.webkitSpeechRecognition;
     const supported = Boolean(Recognition) && win.isSecureContext;
     let uploading = false;
@@ -117,7 +119,9 @@ export function initApp(doc = document, win = window) {
         get('skippedWords').textContent = stats.skipped;
         get('unreadWords').textContent = stats.unread;
         get('accuracy').textContent = `%${stats.accuracy}`;
-        get('resultSummary').textContent = 'Metnin tamamını bitirdiniz! Atlanan kelimeleri yeniden çalışabilirsiniz.';
+        get('resultSummary').textContent = snapshot.finishedEarly
+            ? 'Okuma erken sonlandırıldı. Henüz okunmayan kelimeler hata sayısına eklenmedi. İsterseniz yeniden başlayabilirsiniz.'
+            : 'Metnin tamamını bitirdiniz! Atlanan kelimeleri yeniden çalışabilirsiniz.';
         const practiceWords = snapshot.words.filter((_, i) => ['incorrect', 'skipped'].includes(snapshot.outcomes[i]));
         get('incorrectWordsContainer').hidden = practiceWords.length === 0;
         get('incorrectWordsList').textContent = practiceWords.join(', ');
@@ -135,10 +139,12 @@ export function initApp(doc = document, win = window) {
         const correction = snapshot.correctionPending || snapshot.phase === 'correction';
         startButton.disabled = uploading || !supported || !hasWords || busy || correction;
         resetButton.disabled = uploading || !hasWords || ['starting', 'listening', 'stopping'].includes(snapshot.phase);
+        finishButton.disabled = uploading || !hasWords || snapshot.finishedEarly || snapshot.stats.completed;
         const labels = {
             ready: 'Okumaya Başla', starting: 'Mikrofon Açılıyor…', listening: 'Okumayı Durdur',
             stopping: 'Mikrofon Kapanıyor…', correction: 'Kelimeyi Düzelt', paused: 'Devam Et',
-            error: 'Yeniden Dene', completed: 'Baştan Oku', unsupported: 'Sesli Okuma Desteklenmiyor'
+            error: 'Yeniden Dene', completed: 'Baştan Oku', 'finished-early': 'Baştan Oku',
+            unsupported: 'Sesli Okuma Desteklenmiyor'
         };
         startButton.textContent = labels[snapshot.phase] || 'Okumaya Başla';
         startButton.setAttribute('aria-pressed', String(snapshot.phase === 'listening'));
@@ -164,13 +170,16 @@ export function initApp(doc = document, win = window) {
                 error: (microphoneMessages[snapshot.error] || 'Mikrofon başlatılamadı. İzinleri kontrol edip yeniden deneyin.')
                     + (correction ? ' Bu kelime için Tekrar Oku veya Atla seçeneğini kullanın.' : ''),
                 completed: 'Okuma tamamlandı. Raporunuz hazır.',
+                'finished-early': 'Okuma erken sonlandırıldı. Raporunuz hazır.',
                 unsupported: get('microphoneHelp').textContent
             };
             announce(messages[snapshot.phase] || messages.ready);
             if (correction && !previousCorrection) retryButton.focus();
-            if (snapshot.phase === 'completed' && previousPhase !== 'completed') showResults(snapshot);
+            if (['completed', 'finished-early'].includes(snapshot.phase) && previousPhase !== snapshot.phase) showResults(snapshot);
+            // An upload may temporarily hide a pending report. Do not consume
+            // its terminal transition unless the report can actually be shown.
+            previousPhase = snapshot.phase;
         }
-        previousPhase = snapshot.phase;
         previousCorrection = correction;
     }
 
@@ -189,6 +198,18 @@ export function initApp(doc = document, win = window) {
         closeResults(false);
         engine.load(engine.snapshot().words);
         startButton.focus();
+    });
+    finishButton.addEventListener('click', () => {
+        win.speechSynthesis?.cancel();
+        engine.finishEarly();
+    });
+    restartButton.addEventListener('click', () => {
+        closeResults(false);
+        win.speechSynthesis?.cancel();
+        engine.load(engine.snapshot().words);
+        if (supported) engine.start();
+        // The start button is disabled while the microphone starts.
+        (startButton.disabled ? finishButton : startButton).focus();
     });
     retryButton.addEventListener('click', () => { win.speechSynthesis?.cancel(); engine.retryWord(); });
     skipButton.addEventListener('click', () => { win.speechSynthesis?.cancel(); engine.skipWord(); });
