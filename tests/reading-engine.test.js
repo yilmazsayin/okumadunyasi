@@ -427,3 +427,313 @@ test('snapshot copies prevent views from mutating the engine', () => {
     assert.deepEqual(engine.snapshot().words, ['Ali']);
     assert.deepEqual(engine.snapshot().outcomes, ['pending']);
 });
+
+test('early finish halfway, after the first word, and before any accepted word preserves unread positions', async t => {
+    for (const { label, words, transcript, correct } of [
+        { label: 'halfway', words: ['bir', 'iki', 'üç', 'dört'], transcript: 'bir iki', correct: 2 },
+        { label: 'first word', words: ['bir', 'iki', 'üç'], transcript: 'bir', correct: 1 },
+        { label: 'no word', words: ['bir', 'iki', 'üç'], transcript: null, correct: 0 },
+    ]) {
+        await t.test(label, () => {
+            const { engine, recognizers, changes } = setup(words);
+            const recognition = listen(engine, recognizers);
+            if (transcript) recognition.result([transcript]);
+            const previousStats = engine.snapshot().stats;
+            engine.finishEarly();
+            assert.equal(engine.snapshot().phase, 'stopping');
+            assert.equal(engine.snapshot().finishedEarly, true);
+            assert.equal(recognition.stopCalls, 1);
+            assert.equal(changes.some(state => state.phase === 'finished-early'), false);
+            recognition.ended();
+            const state = engine.snapshot();
+            assert.equal(state.phase, 'finished-early');
+            assert.deepEqual(state.stats, previousStats);
+            assert.equal(state.stats.correct, correct);
+            assert.equal(state.stats.unread, words.length - correct);
+            assert.equal(state.stats.incorrect, 0);
+            assert.equal(state.stats.accuracy, Math.round(correct / words.length * 100));
+            assert.equal(state.stats.completed, false);
+        });
+    }
+});
+
+test('ready and fully paused readings finish immediately without opening a new microphone session', () => {
+    const ready = setup();
+    ready.engine.finishEarly();
+    assert.equal(ready.engine.snapshot().phase, 'finished-early');
+    assert.equal(ready.engine.snapshot().stats.unread, 3);
+    assert.equal(ready.recognizers.length, 0);
+
+    const { engine, recognizers } = setup();
+    const recognition = listen(engine, recognizers);
+    recognition.result(['Ali']);
+    engine.pause();
+    recognition.ended();
+    const pausedStats = engine.snapshot().stats;
+    engine.finishEarly();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.deepEqual(engine.snapshot().stats, pausedStats);
+    assert.equal(recognition.stopCalls, 1);
+    assert.equal(recognizers.length, 1);
+});
+
+test('finish during pause shutdown replaces resume and waits for onend', () => {
+    const { engine, recognizers } = setup();
+    const recognition = listen(engine, recognizers);
+    recognition.result(['Ali']);
+    engine.pause();
+    engine.start();
+    engine.finishEarly();
+    engine.start();
+    assert.equal(engine.snapshot().phase, 'stopping');
+    assert.equal(recognition.stopCalls, 1);
+    recognition.ended();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.equal(engine.snapshot().stats.correct, 1);
+    assert.equal(recognizers.length, 1);
+});
+
+test('early finish from a wrong-word correction retains the incorrect word without counting unread words as errors', async t => {
+    for (const alreadyStopped of [false, true]) {
+        await t.test(alreadyStopped ? 'correction shown' : 'correction stopping', () => {
+            const { engine, recognizers } = setup();
+            const recognition = listen(engine, recognizers);
+            recognition.result(['Ali yanlış']);
+            if (alreadyStopped) recognition.ended();
+            engine.finishEarly();
+            assert.equal(engine.snapshot().correctionPending, false);
+            engine.retryWord();
+            engine.skipWord();
+            if (!alreadyStopped) recognition.ended();
+            assert.equal(engine.snapshot().phase, 'finished-early');
+            assert.deepEqual(engine.snapshot().outcomes, ['correct', 'incorrect', 'pending']);
+            assert.deepEqual(engine.snapshot().stats, {
+                total: 3, correct: 1, incorrect: 1, skipped: 0, unread: 1,
+                processed: 1, accuracy: 33, completed: false,
+            });
+            assert.equal(recognizers.length, 1);
+        });
+    }
+});
+
+test('early finish preserves skipped, incorrect and unread counts as separate existing outcomes', () => {
+    const { engine, recognizers } = setup(['bir', 'iki', 'üç', 'dört', 'beş']);
+    const first = listen(engine, recognizers);
+    first.result(['bir yanlış']);
+    engine.skipWord();
+    first.ended();
+    const second = recognizers[1];
+    second.started();
+    second.result(['yanlış']);
+    engine.finishEarly();
+    second.ended();
+    assert.deepEqual(engine.snapshot().outcomes, ['correct', 'skipped', 'incorrect', 'pending', 'pending']);
+    assert.deepEqual(engine.snapshot().stats, {
+        total: 5, correct: 1, incorrect: 2, skipped: 1, unread: 2,
+        processed: 2, accuracy: 20, completed: false,
+    });
+});
+
+test('finish after the final correct or skipped word keeps normal completion', async t => {
+    for (const outcome of ['correct', 'skipped']) {
+        await t.test(outcome, () => {
+            const { engine, recognizers, changes } = setup(['bir']);
+            const recognition = listen(engine, recognizers);
+            recognition.result([outcome === 'correct' ? 'bir' : 'yanlış']);
+            if (outcome === 'skipped') engine.skipWord();
+            engine.finishEarly();
+            assert.equal(engine.snapshot().phase, 'stopping');
+            assert.equal(engine.snapshot().finishedEarly, false);
+            recognition.ended();
+            engine.finishEarly();
+            assert.equal(engine.snapshot().phase, 'completed');
+            assert.equal(engine.snapshot().stats.completed, true);
+            assert.equal(engine.snapshot().finishedEarly, false);
+            assert.equal(changes.some(state => state.phase === 'finished-early'), false);
+        });
+    }
+});
+
+test('early finish ignores rapid duplicate clicks and late recognition events before and after its single terminal publication', () => {
+    const { engine, recognizers, changes } = setup();
+    const recognition = listen(engine, recognizers);
+    recognition.result(['Ali']);
+    engine.finishEarly();
+    const stats = engine.snapshot().stats;
+    for (let click = 0; click < 5; click++) {
+        engine.finishEarly();
+        engine.start();
+        engine.pause();
+        engine.retryWord();
+        engine.skipWord();
+    }
+    recognition.result(['Ali', 'okula gitti'], 1);
+    recognition.error('network');
+    recognition.started();
+    assert.equal(engine.snapshot().phase, 'stopping');
+    assert.equal(engine.snapshot().error, null);
+    assert.deepEqual(engine.snapshot().stats, stats);
+    assert.equal(recognition.stopCalls, 1);
+    recognition.ended();
+    recognition.result(['yanlış']);
+    recognition.error('not-allowed');
+    recognition.started();
+    recognition.ended();
+    engine.finishEarly();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.deepEqual(engine.snapshot().stats, stats);
+    assert.equal(changes.filter(state => state.phase === 'finished-early').length, 1);
+    assert.equal(recognizers.length, 1);
+});
+
+test('early finish before onstart waits, sends one stop at onstart, and never accepts speech', () => {
+    const { engine, recognizers, changes } = setup();
+    engine.start();
+    const recognition = recognizers[0];
+    engine.finishEarly();
+    engine.start();
+    engine.pause();
+    assert.equal(recognition.stopCalls, 0);
+    assert.equal(engine.snapshot().phase, 'stopping');
+    recognition.started();
+    recognition.started();
+    recognition.result(['Ali okula gitti']);
+    recognition.error('aborted');
+    assert.equal(recognition.stopCalls, 1);
+    assert.equal(changes.some(state => state.phase === 'finished-early'), false);
+    recognition.ended();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.equal(engine.snapshot().stats.unread, 3);
+    assert.equal(engine.snapshot().stats.incorrect, 0);
+    assert.equal(recognizers.length, 1);
+});
+
+test('permission denial before onstart preserves an early finish request until onend', () => {
+    const { engine, recognizers } = setup();
+    engine.start();
+    const recognition = recognizers[0];
+    engine.finishEarly();
+    recognition.error('not-allowed');
+    assert.equal(engine.snapshot().phase, 'stopping');
+    assert.equal(engine.snapshot().finishedEarly, true);
+    recognition.ended();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.equal(engine.snapshot().error, null);
+    assert.equal(engine.snapshot().stats.completed, false);
+});
+
+test('a new reading after early finish resets all outcomes and rejects callbacks from the previous microphone', () => {
+    const { engine, recognizers } = setup();
+    const first = listen(engine, recognizers);
+    first.result(['Ali']);
+    engine.finishEarly();
+    first.ended();
+    engine.start();
+    const second = recognizers[1];
+    assert.equal(engine.snapshot().finishedEarly, false);
+    assert.equal(engine.snapshot().index, 0);
+    assert.deepEqual(engine.snapshot().outcomes, ['pending', 'pending', 'pending']);
+    first.result(['Ali', 'yanlış'], 1);
+    first.error('network');
+    first.ended();
+    assert.equal(engine.snapshot().phase, 'starting');
+    second.started();
+    second.result(['Ali okula gitti']);
+    second.ended();
+    assert.equal(engine.snapshot().phase, 'completed');
+    assert.equal(engine.snapshot().stats.accuracy, 100);
+    assert.equal(engine.snapshot().finishedEarly, false);
+});
+
+test('early finish replaces a correction retry that was queued before the microphone ended', () => {
+    const { engine, recognizers } = setup();
+    const recognition = listen(engine, recognizers);
+    recognition.result(['yanlış']);
+    engine.retryWord();
+    engine.finishEarly();
+    recognition.ended();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.equal(engine.snapshot().stats.unread, 3);
+    assert.equal(recognizers.length, 1);
+});
+
+test('loading a new document cancels pending early finish and fences old events', () => {
+    const { engine, recognizers, changes } = setup();
+    const old = listen(engine, recognizers);
+    old.result(['Ali']);
+    engine.finishEarly();
+    engine.load(['Yeni', 'metin']);
+    engine.start();
+    old.result(['Ali', 'yanlış'], 1);
+    old.error('network');
+    assert.equal(engine.snapshot().finishedEarly, false);
+    assert.equal(engine.snapshot().stats.unread, 2);
+    old.ended();
+    assert.equal(recognizers.length, 2);
+    assert.equal(changes.some(state => state.phase === 'finished-early'), false);
+    recognizers[1].started();
+    recognizers[1].result(['Yeni metin']);
+    recognizers[1].ended();
+    assert.equal(engine.snapshot().phase, 'completed');
+});
+
+test('early finish remains available after microphone errors, including while their onend is pending', async t => {
+    for (const alreadyStopped of [false, true]) {
+        await t.test(alreadyStopped ? 'error closed' : 'error closing', () => {
+            const { engine, recognizers } = setup();
+            const recognition = listen(engine, recognizers);
+            recognition.result(['Ali']);
+            recognition.error('network');
+            if (alreadyStopped) recognition.ended();
+            engine.finishEarly();
+            if (!alreadyStopped) {
+                assert.equal(engine.snapshot().phase, 'stopping');
+                recognition.error('aborted');
+                recognition.ended();
+            }
+            assert.equal(engine.snapshot().phase, 'finished-early');
+            assert.equal(engine.snapshot().stats.correct, 1);
+            assert.equal(engine.snapshot().error, null);
+        });
+    }
+});
+
+test('stop failures preserve early finish ownership until the recognizer actually ends', async t => {
+    for (const abortAlsoFails of [false, true]) {
+        await t.test(abortAlsoFails ? 'stop and abort throw' : 'abort fallback', () => {
+            const { engine, recognizers, changes } = setup();
+            const recognition = listen(engine, recognizers);
+            recognition.stop = () => { throw new DOMException('Synthetic stop failure', 'InvalidStateError'); };
+            if (abortAlsoFails) recognition.abort = () => { throw new DOMException('Synthetic abort failure', 'InvalidStateError'); };
+            engine.finishEarly();
+            recognition.error('network');
+            assert.equal(engine.snapshot().phase, 'stopping');
+            assert.equal(changes.some(state => state.phase === 'finished-early'), false);
+            recognition.ended();
+            assert.equal(engine.snapshot().phase, 'finished-early');
+            assert.equal(engine.snapshot().stats.unread, 3);
+        });
+    }
+});
+
+test('unsupported browsers may finish an unread loaded text but never attempt a restart', () => {
+    const engine = new ReadingEngine();
+    engine.load(['Ali', 'gitti']);
+    engine.finishEarly();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.equal(engine.snapshot().finishedEarly, true);
+    assert.equal(engine.snapshot().stats.unread, 2);
+    engine.start();
+    assert.equal(engine.snapshot().phase, 'finished-early');
+    assert.equal(engine.snapshot().error, null);
+});
+
+test('empty documents cannot produce early reports or change the ready state', () => {
+    const { engine, recognizers, changes } = setup(['...', '—']);
+    const publishedBefore = changes.length;
+    engine.finishEarly();
+    assert.equal(engine.snapshot().phase, 'ready');
+    assert.equal(engine.snapshot().finishedEarly, false);
+    assert.equal(changes.length, publishedBefore);
+    assert.equal(recognizers.length, 0);
+});

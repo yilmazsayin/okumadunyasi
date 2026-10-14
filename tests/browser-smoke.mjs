@@ -77,6 +77,40 @@ async function event(page, type, value) {
     }, { type, value });
 }
 
+// Model the Web Speech API's cumulative final-results list, including old
+// recognizers whose callbacks may already be queued when reading finishes.
+async function speechEvent(page, type, value, recognitionIndex = -1) {
+    await page.evaluate(({ type, value, recognitionIndex }) => {
+        const recognition = window.__recognitions.at(recognitionIndex);
+        if (type === 'result') {
+            const result = [{ transcript: value }];
+            result.isFinal = true;
+            recognition.testResults ??= [];
+            recognition.testResults.push(result);
+            recognition.onresult({ resultIndex: recognition.testResults.length - 1, results: recognition.testResults });
+        } else if (type === 'error') recognition.onerror({ error: value });
+        else recognition[`on${type}`]();
+    }, { type, value, recognitionIndex });
+}
+
+async function expectReport(page, expected) {
+    assert.equal(await page.locator('#sonucModal').isVisible(), true);
+    const stats = await page.evaluate(() => Object.fromEntries(
+        ['totalWords', 'correctWords', 'incorrectWords', 'skippedWords', 'unreadWords', 'accuracy']
+            .map(id => [id, document.getElementById(id).textContent])
+    ));
+    assert.deepEqual(stats, {
+        totalWords: String(expected.total), correctWords: String(expected.correct),
+        incorrectWords: String(expected.incorrect), skippedWords: String(expected.skipped),
+        unreadWords: String(expected.unread), accuracy: `%${expected.accuracy}`
+    });
+}
+
+async function beginReading(page) {
+    await page.locator('#baslatBtn').click();
+    await speechEvent(page, 'start');
+}
+
 test('static ES modules load; DOCX upload text and filename cannot inject HTML', async t => {
     const text = '<img src=x onerror=alert(1)> Merhaba & dünya';
     const page = await setup(t, { text });
@@ -103,6 +137,11 @@ test('complete reading waits for microphone end; modal traps focus and can close
     assert.equal(await page.locator('#accuracy').textContent(), '%100');
     assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '100');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'modalKapatBtn');
+    // New report actions may add more buttons; the last one must wrap to close.
+    await page.locator('#sonucModal').evaluate(modal => {
+        const buttons = [...modal.querySelectorAll('button')].filter(button => !button.disabled && !button.closest('[hidden]'));
+        buttons.at(-1).focus();
+    });
     await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'modalKapatBtn');
     await page.keyboard.press('Escape');
@@ -269,4 +308,259 @@ test('320px viewport fits document, correction controls and scrollable results w
     const bounds = await page.locator('.modal-content').boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 320);
     assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 568);
+});
+
+test('finish midway freezes results, waits for microphone end and opens the early report only once', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi kuş');
+    await page.evaluate(() => {
+        window.__reportFocusCount = 0;
+        document.getElementById('modalKapatBtn').addEventListener('focus', () => window.__reportFocusCount++);
+    });
+    await page.locator('#finishReadingBtn').click();
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__recognitions[0].stopCalls), 1);
+    assert.equal(await page.locator('#finishReadingBtn').isDisabled(), true);
+    // Simulate rapid repeated clicks and queued speech/error callbacks after finish.
+    await page.evaluate(() => {
+        const button = document.getElementById('finishReadingBtn');
+        button.click(); button.click(); button.click();
+    });
+    await speechEvent(page, 'result', 'yavaş uçar');
+    await speechEvent(page, 'error', 'network');
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 2, incorrect: 0, skipped: 0, unread: 2, accuracy: 50 });
+    assert.match(await page.locator('#resultSummary').textContent(), /Okuma erken sonlandırıldı/);
+    assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '50');
+    assert.equal(await page.locator('#kelime-2').getAttribute('class'), 'word-button');
+    assert.equal(await page.locator('#kelime-3').getAttribute('class'), 'word-button');
+    await speechEvent(page, 'result', 'yanlış');
+    await speechEvent(page, 'error', 'not-allowed');
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 2, incorrect: 0, skipped: 0, unread: 2, accuracy: 50 });
+    assert.equal(await page.evaluate(() => window.__reportFocusCount), 1);
+    assert.equal(await page.evaluate(() => window.__recognitions[0].stopCalls), 1);
+});
+
+test('finish after the first word reports remaining words as unread, not incorrect', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'MAVİ!');
+    await page.locator('#finishReadingBtn').click();
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 1, incorrect: 0, skipped: 0, unread: 3, accuracy: 25 });
+    assert.equal(await page.locator('#incorrectWordsContainer').isVisible(), false);
+});
+
+test('finish with no spoken words works before microphone start and preserves the whole unread document', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    assert.equal(await page.locator('#finishReadingBtn').isDisabled(), true);
+    await upload(page);
+    assert.equal(await page.locator('#finishReadingBtn').isDisabled(), false);
+    await page.locator('#finishReadingBtn').click();
+    await expectReport(page, { total: 4, correct: 0, incorrect: 0, skipped: 0, unread: 4, accuracy: 0 });
+    assert.match(await page.locator('#resultSummary').textContent(), /Okuma erken sonlandırıldı/);
+    assert.equal(await page.evaluate(() => window.__recognitions.length), 0);
+});
+
+test('finish while microphone is opening waits for both onstart and onend', async t => {
+    const page = await setup(t);
+    await upload(page);
+    await page.locator('#baslatBtn').click();
+    await page.locator('#finishReadingBtn').click();
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__recognitions[0].stopCalls), 0);
+    await speechEvent(page, 'start');
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__recognitions[0].stopCalls), 1);
+    await speechEvent(page, 'result', 'merhaba dünya');
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 2, correct: 0, incorrect: 0, skipped: 0, unread: 2, accuracy: 0 });
+});
+
+test('pause remains resumable and finish from pause opens a report without reopening the microphone', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi');
+    assert.equal(await page.locator('#baslatBtn').textContent(), 'Okumayı Durdur');
+    await page.locator('#baslatBtn').click();
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    await speechEvent(page, 'end');
+    assert.equal(await page.locator('#baslatBtn').textContent(), 'Devam Et');
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    await page.locator('#finishReadingBtn').click();
+    await expectReport(page, { total: 4, correct: 1, incorrect: 0, skipped: 0, unread: 3, accuracy: 25 });
+    assert.equal(await page.evaluate(() => window.__recognitions.length), 1);
+    assert.equal(await page.evaluate(() => window.__recognitions[0].stopCalls), 1);
+});
+
+for (const microphoneEnded of [false, true]) {
+    test(`finish during ${microphoneEnded ? 'settled' : 'stopping'} word correction preserves its error separately from unread words`, async t => {
+        const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+        await upload(page);
+        await beginReading(page);
+        await speechEvent(page, 'result', 'mavi yanlış');
+        if (microphoneEnded) await speechEvent(page, 'end');
+        assert.equal(await page.locator('#correction-box').isVisible(), true);
+        assert.equal(await page.locator('#finishReadingBtn').isDisabled(), false);
+        await page.locator('#finishReadingBtn').click();
+        if (!microphoneEnded) {
+            assert.equal(await page.locator('#sonucModal').isVisible(), false);
+            await speechEvent(page, 'end');
+        }
+        await expectReport(page, { total: 4, correct: 1, incorrect: 1, skipped: 0, unread: 2, accuracy: 25 });
+        assert.equal(await page.locator('#incorrectWordsList').textContent(), 'kuş');
+        assert.equal(await page.locator('#correction-box').isVisible(), false);
+        assert.equal(await page.locator('#kelime-1').getAttribute('class'), 'word-button incorrect');
+        assert.equal(await page.locator('#kelime-2').getAttribute('class'), 'word-button');
+        assert.equal(await page.evaluate(() => window.__recognitions.length), 1);
+    });
+}
+
+test('finish after skipping a failed word keeps the existing skipped and incorrect counts', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi yanlış');
+    await speechEvent(page, 'end');
+    await page.locator('#skip-word-btn').click();
+    await speechEvent(page, 'start');
+    await page.locator('#finishReadingBtn').click();
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 1, incorrect: 1, skipped: 1, unread: 2, accuracy: 25 });
+    assert.equal(await page.locator('#incorrectWordsList').textContent(), 'kuş');
+});
+
+test('finish after a microphone error still waits for onend and protects the early report', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi kuş');
+    await speechEvent(page, 'error', 'network');
+    assert.equal(await page.locator('#finishReadingBtn').isDisabled(), false);
+    await page.locator('#finishReadingBtn').click();
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    await speechEvent(page, 'error', 'not-allowed');
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 2, incorrect: 0, skipped: 0, unread: 2, accuracy: 50 });
+    assert.match(await page.locator('#resultSummary').textContent(), /Okuma erken sonlandırıldı/);
+});
+
+test('failed replacement upload restores the early report when microphone end arrived during upload', async t => {
+    let requests = 0;
+    let releaseUpload;
+    let notifyPendingUpload;
+    const pendingUpload = new Promise(resolve => { notifyPendingUpload = resolve; });
+    const page = await setup(t, { response: async route => {
+        if (++requests === 1) return route.fulfill({ json: { text: 'Mavi kuş yavaş uçar' } });
+        await new Promise(resolve => { releaseUpload = resolve; notifyPendingUpload(); });
+        await route.fulfill({ status: 502, body: 'synthetic upload failure' });
+    } });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi');
+    await page.evaluate(() => {
+        window.__reportFocusCount = 0;
+        document.getElementById('modalKapatBtn').addEventListener('focus', () => window.__reportFocusCount++);
+    });
+    await page.locator('#finishReadingBtn').click();
+    await page.locator('#file-input').setInputFiles({ name: 'yeni-yapay-metin.docx', mimeType: 'application/octet-stream', buffer: Buffer.from('synthetic replacement fixture') });
+    let waitTimer;
+    try {
+        await Promise.race([
+            pendingUpload,
+            new Promise((_, reject) => { waitTimer = setTimeout(() => reject(new Error('replacement upload request did not arrive')), 5000); })
+        ]);
+    } finally { clearTimeout(waitTimer); }
+    assert.equal(await page.locator('#file-upload-area').getAttribute('aria-busy'), 'true');
+    await speechEvent(page, 'end');
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__reportFocusCount), 0);
+    releaseUpload();
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false', null, { timeout: 5000 });
+    await expectReport(page, { total: 4, correct: 1, incorrect: 0, skipped: 0, unread: 3, accuracy: 25 });
+    assert.match(await page.locator('#resultSummary').textContent(), /Okuma erken sonlandırıldı/);
+    assert.match(await page.locator('#durum').textContent(), /işlenemedi/);
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Mavi kuş yavaş uçar');
+    await speechEvent(page, 'result', 'kuş yavaş uçar');
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 1, incorrect: 0, skipped: 0, unread: 3, accuracy: 25 });
+    assert.equal(await page.evaluate(() => window.__reportFocusCount), 1);
+});
+
+test('restart from an early report resets outcomes and old callbacks cannot affect the new reading', async t => {
+    const page = await setup(t, { text: 'Mavi kuş yavaş uçar' });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi yanlış');
+    await page.locator('#finishReadingBtn').click();
+    await speechEvent(page, 'end');
+    await page.getByRole('button', { name: 'Yeniden Okumaya Başla', exact: true }).click();
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '0');
+    assert.equal(await page.locator('.word-button.correct, .word-button.incorrect, .word-button.skipped').count(), 0);
+    assert.equal(await page.evaluate(() => window.__recognitions.length), 2);
+    await speechEvent(page, 'result', 'kuş yavaş uçar', 0);
+    await speechEvent(page, 'error', 'not-allowed', 0);
+    await speechEvent(page, 'end', undefined, 0);
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '0');
+    await speechEvent(page, 'start');
+    await speechEvent(page, 'result', 'mavi kuş yavaş uçar');
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 4, correct: 4, incorrect: 0, skipped: 0, unread: 0, accuracy: 100 });
+    assert.doesNotMatch(await page.locator('#resultSummary').textContent(), /erken sonlandırıldı/);
+});
+
+test('reading the final word remains normal completion and cannot be reclassified as early finish', async t => {
+    const page = await setup(t);
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'merhaba');
+    await speechEvent(page, 'result', 'dünya');
+    assert.equal(await page.locator('#finishReadingBtn').isDisabled(), true);
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    await page.evaluate(() => document.getElementById('finishReadingBtn').click());
+    await speechEvent(page, 'end');
+    await expectReport(page, { total: 2, correct: 2, incorrect: 0, skipped: 0, unread: 0, accuracy: 100 });
+    assert.match(await page.locator('#resultSummary').textContent(), /Metnin tamamını bitirdiniz/);
+    assert.doesNotMatch(await page.locator('#resultSummary').textContent(), /erken sonlandırıldı/);
+});
+
+test('finish is disabled during upload, fits 320px and is usable with keyboard', async t => {
+    let releaseUpload;
+    const page = await setup(t, {
+        viewport: { width: 320, height: 568 },
+        response: async route => {
+            await new Promise(resolve => { releaseUpload = resolve; });
+            await route.fulfill({ json: { text: 'Mavi kuş yavaş uçar' } });
+        }
+    });
+    const finish = page.getByRole('button', { name: 'Bitir ve Sonucu Gör', exact: true });
+    assert.equal(await finish.isDisabled(), true);
+    await page.locator('#file-input').setInputFiles({ name: 'yapay-metin.docx', mimeType: 'application/octet-stream', buffer: Buffer.from('synthetic fixture') });
+    while (!releaseUpload) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(await finish.isDisabled(), true);
+    releaseUpload();
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    assert.equal(await finish.isDisabled(), false);
+    const bounds = await finish.boundingBox();
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 320);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await finish.focus();
+    await page.keyboard.press('Space');
+    await expectReport(page, { total: 4, correct: 0, incorrect: 0, skipped: 0, unread: 4, accuracy: 0 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'baslatBtn');
+    assert.equal(await page.locator('#baslatBtn').textContent(), 'Baştan Oku');
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('#sonucModal').isVisible(), false);
+    assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '0');
+    assert.equal(await page.evaluate(() => window.__recognitions.length), 1);
 });

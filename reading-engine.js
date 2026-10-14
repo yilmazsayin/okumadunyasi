@@ -24,6 +24,7 @@ export class ReadingEngine {
         this.outcomes = [];
         this.index = 0;
         this.correctionPending = false;
+        this.finishedEarly = false;
         this.error = null;
         this.phase = typeof createRecognition === 'function' ? 'ready' : 'unsupported';
     }
@@ -46,8 +47,9 @@ export class ReadingEngine {
     }
 
     start() {
-        if (this.phase === 'unsupported' || !this.words.length || this.correctionPending) return;
-        if (this.phase === 'completed') this._resetProgress();
+        if (typeof this._createRecognition !== 'function' || this.phase === 'unsupported' ||
+            !this.words.length || this.correctionPending || (this.finishedEarly && this._active)) return;
+        if (this.phase === 'completed' || this.phase === 'finished-early') this._resetProgress();
         if (this._active) {
             // A click while starting/listening must never call start twice.
             if (!this._active.stopRequested && this._active.documentVersion === this._documentVersion) return;
@@ -62,7 +64,7 @@ export class ReadingEngine {
 
     pause() {
         if (!this._active) return;
-        if (this._active.nextAction === 'completed') return;
+        if (this._active.nextAction === 'completed' || this.finishedEarly) return;
         this._active.nextAction = this.correctionPending ? 'correction' : 'paused';
         this._active.acceptsResults = false;
         this.phase = 'stopping';
@@ -70,8 +72,27 @@ export class ReadingEngine {
         this._requestStop(this._active);
     }
 
+    finishEarly() {
+        // Normal completion already owns the shutdown of its final word.
+        if (!this.words.length || this.finishedEarly || this.index === this.words.length ||
+            this.phase === 'completed' || this._active?.nextAction === 'completed') return;
+        this.finishedEarly = true;
+        this.correctionPending = false;
+        this.error = null;
+        if (this._active) {
+            this._active.acceptsResults = false;
+            this._active.nextAction = 'finished-early';
+            this.phase = 'stopping';
+            this._publish();
+            this._requestStop(this._active);
+        } else {
+            this.phase = 'finished-early';
+            this._publish();
+        }
+    }
+
     retryWord() {
-        if (!this.correctionPending || this.outcomes[this.index] !== 'incorrect') return;
+        if (this.finishedEarly || !this.correctionPending || this.outcomes[this.index] !== 'incorrect') return;
         this.outcomes[this.index] = 'pending';
         this.correctionPending = false;
         this.error = null;
@@ -79,7 +100,7 @@ export class ReadingEngine {
     }
 
     skipWord() {
-        if (!this.correctionPending || this.outcomes[this.index] !== 'incorrect') return;
+        if (this.finishedEarly || !this.correctionPending || this.outcomes[this.index] !== 'incorrect') return;
         this.outcomes[this.index] = 'skipped';
         this.index++;
         this.correctionPending = false;
@@ -97,6 +118,7 @@ export class ReadingEngine {
             outcomes: [...this.outcomes],
             index: this.index,
             correctionPending: this.correctionPending,
+            finishedEarly: this.finishedEarly,
             error: this.error,
             stats: {
                 total,
@@ -117,6 +139,7 @@ export class ReadingEngine {
         this.outcomes = this.words.map(() => 'pending');
         this.index = 0;
         this.correctionPending = false;
+        this.finishedEarly = false;
         this.error = null;
     }
 
@@ -251,7 +274,7 @@ export class ReadingEngine {
     _requestStop(session) {
         if (this._active !== session) return;
         session.stopRequested = true;
-        // If pause/load happens before onstart, stop as soon as onstart arrives.
+        // If pause/load/finish happens before onstart, stop as soon as onstart arrives.
         if (!session.hasStarted || session.stopSent) return;
         session.stopSent = true;
         try {
@@ -261,9 +284,13 @@ export class ReadingEngine {
                 session.recognition.abort();
             } catch {
                 if (this._isCurrent(session)) {
-                    session.nextAction = 'error';
+                    // A failed stop must not open an early report while the
+                    // recognizer still owns the microphone. Keep awaiting onend.
+                    if (session.nextAction !== 'finished-early') {
+                        session.nextAction = 'error';
+                        this.phase = 'error';
+                    }
                     this.error = 'stop-failed';
-                    this.phase = 'error';
                     this._publish();
                 }
             }
@@ -272,7 +299,7 @@ export class ReadingEngine {
 
     _handleError(session, event) {
         if (!this._isCurrent(session)) return;
-        if (session.nextAction === 'completed') return;
+        if (session.nextAction === 'completed' || session.nextAction === 'finished-early') return;
         // An abort requested by this engine is not a new microphone failure.
         if (event.error === 'aborted' && session.stopRequested) return;
         session.acceptsResults = false;

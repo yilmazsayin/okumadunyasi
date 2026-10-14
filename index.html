@@ -89,6 +89,10 @@
         .reading-controls { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 15px; margin-top: 25px; }
         #baslatBtn { max-width: 100%; margin-top: 0; }
         #resetReadingBtn { border: 2px solid #bd8500; background: #fff0c2; color: #664600; border-radius: 20px; padding: 12px 18px; font-weight: 800; font-size: 16px; cursor: pointer; }
+        #finishReadingBtn { max-width: 100%; min-height: 48px; padding: 12px 18px; border: 2px solid #633b82; border-radius: 25px; background: linear-gradient(to bottom, #9164b7, #754599); color: white; font-size: 16px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 0 #533070; }
+        #finishReadingBtn:hover:not(:disabled) { background: #754599; }
+        #finishReadingHelp { color: #526269; font-size: 0.95em; line-height: 1.6; margin: 15px 0 0; }
+        #restartReadingBtn { max-width: 100%; min-height: 44px; margin-top: 20px; padding: 12px 18px; border: 2px solid #267a74; border-radius: 20px; background: #4ecdc4; color: #123e3b; font-size: 16px; font-weight: 800; cursor: pointer; }
         #microphoneHelp { color: #526269; font-size: 1em; line-height: 1.6; margin: 15px 0 0; }
         #durum { color: #a53232; height: auto; min-height: 30px; line-height: 1.5; display: block; }
         .loader { display: inline-block; vertical-align: middle; margin-right: 10px; }
@@ -148,8 +152,10 @@
         
         <div class="reading-controls">
             <button type="button" id="baslatBtn" aria-describedby="microphoneHelp" disabled><i class="fas fa-microphone" aria-hidden="true"></i>Okumaya Başla</button>
+            <button type="button" id="finishReadingBtn" aria-describedby="finishReadingHelp" disabled>Bitir ve Sonucu Gör</button>
             <button type="button" id="resetReadingBtn" disabled>Metni Baştan Oku</button>
         </div>
+        <p id="finishReadingHelp">Okumayı Durdur ile mola verip devam edebilirsiniz. Bitir ve Sonucu Gör ile okumayı bitirip raporunuzu açabilirsiniz.</p>
         <p id="microphoneHelp">Okumaya başlarken tarayıcının mikrofon iznine izin verin. Sesli okuma için konuşma tanımayı destekleyen bir tarayıcı gerekir.</p>
 
         <div id="okuma-alani" aria-label="Okunacak metin"></div>
@@ -173,13 +179,14 @@
             <p>Hatalı Okunan: <strong id="incorrectWords" style="color: #c62828;">0</strong></p>
             <p>Hatalı kelimelerden atlanan: <strong id="skippedWords">0</strong></p>
             <p>Henüz Okunmayan: <strong id="unreadWords">0</strong></p>
-            <h3>Başarı Oranı: <strong id="accuracy" style="color: #ff9f1c;">%0</strong></h3>
+            <h3>Genel Başarı Oranı: <strong id="accuracy" style="color: #ff9f1c;">%0</strong></h3>
             <p class="accuracy-explanation">Başarı oranı, doğru okunan kelimelerin bu okumadaki tüm kelimelere oranıdır. Atlanan ve henüz okunmayan kelimeler de toplama dahildir.</p>
             <div id="incorrectWordsContainer" hidden>
                 <h4>Tekrar Etmen Gereken Kelimeler:</h4>
                 <div id="incorrectWordsList"></div>
                 <button type="button" id="retryIncorrectBtn"><i class="fas fa-star" aria-hidden="true"></i> Yanlışları Tekrar Oku</button>
             </div>
+            <button type="button" id="restartReadingBtn">Yeniden Okumaya Başla</button>
         </div>
     </div>
 
