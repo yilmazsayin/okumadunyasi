@@ -58,6 +58,13 @@ HTML olarak yorumlamaz. Sürükle-bırak, Enter/Space ile dosya seçme, klavyeyl
 seslendirme ve raporda odak yönetimi desteklenir. Mikrofon açıkken kelime seslendirme
 kontrolleri kapalıdır; uygulamanın kendi sesini okuma sonucu saymaması amaçlanır.
 
+Uzun metinlerde okuma kontrolleri metnin yanında sticky kalır; Tekrar Oku / Atla
+ekran içindeki ayrı panelde gösterilir. Odak değişimleri sayfayı kaydırmaz; sıradaki
+kelime ancak gerektiğinde, kontrollerin kapatmadığı alana getirilir. Elle kaydırma
+kelimeye geri zorlanmaz. Sonuç penceresi arka sayfayı mevcut konumunda kilitler;
+rapor kendi içinde kaydırılır ve her açılışta baştan gösterilir. Kapatma önceki
+konumu korur; yeniden başlatma ilk kelimeyi ve ilgili kontrolü görünür hale getirir.
+
 ## Testler
 
 Node.js 18 veya üstü, npm ve tarayıcı testleri için Chromium gerekir:
@@ -78,6 +85,9 @@ testleri gerçek HTML/ES modülleri, güvenli metin gösterimi, API yanıt hatal
 kontrolleri, eşzamanlı yükleme, sürükle-bırak, klavye odağı ve 320px taşma kontrolünü
 çalıştırır. API yanıtları ve SpeechRecognition olayları sahtedir; canlı API'ye dosya
 ve gerçek ses gönderilmez. Test verileri yapaydır ve kişisel bilgi içermez.
+Uzun metin testleri ayrıca `window.scrollY`, odak ve kelime/kontrol konumlarını,
+modal iç kaydırmayı, arka sayfa kilidini ve kapatıp yeniden başlama davranışlarını
+masaüstünde ve 320px genişlikte kısa mobil viewportlarda doğrular.
 
 ## Gerçek cihazda yapılacak kontroller
 

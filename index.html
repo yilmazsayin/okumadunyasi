@@ -86,23 +86,27 @@
         .skipped { background-color: #fff0c2 !important; color: #755000 !important; border-bottom: 4px dashed #b57a00 !important; }
         #okuma-alani .word-button.incorrect { border-bottom: 4px solid #e53935; }
         #okuma-alani [aria-current="true"] { outline: 3px solid #2456a6; outline-offset: 1px; }
-        .reading-controls { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 15px; margin-top: 25px; }
-        #baslatBtn { max-width: 100%; margin-top: 0; }
+        .reading-controls { position: sticky; top: 10px; z-index: 15; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; margin-top: 25px; padding: 10px; background: #fffaf0; border: 2px solid #ffdfa5; border-radius: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+        #baslatBtn { max-width: 100%; margin: 0; }
         #resetReadingBtn { border: 2px solid #bd8500; background: #fff0c2; color: #664600; border-radius: 20px; padding: 12px 18px; font-weight: 800; font-size: 16px; cursor: pointer; }
         #finishReadingBtn { max-width: 100%; min-height: 48px; padding: 12px 18px; border: 2px solid #633b82; border-radius: 25px; background: linear-gradient(to bottom, #9164b7, #754599); color: white; font-size: 16px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 0 #533070; }
         #finishReadingBtn:hover:not(:disabled) { background: #754599; }
+        .reading-controls #baslatBtn { flex: 1 1 210px; min-height: 70px; padding: 12px; font-size: 18px; line-height: 1.25; letter-spacing: 0.5px; }
+        .reading-controls #finishReadingBtn { flex: 1 1 180px; min-height: 70px; line-height: 1.25; }
+        .reading-controls #resetReadingBtn { flex: 1 1 160px; min-height: 70px; line-height: 1.25; }
         #finishReadingHelp { color: #526269; font-size: 0.95em; line-height: 1.6; margin: 15px 0 0; }
         #restartReadingBtn { max-width: 100%; min-height: 44px; margin-top: 20px; padding: 12px 18px; border: 2px solid #267a74; border-radius: 20px; background: #4ecdc4; color: #123e3b; font-size: 16px; font-weight: 800; cursor: pointer; }
         #microphoneHelp { color: #526269; font-size: 1em; line-height: 1.6; margin: 15px 0 0; }
         #durum { color: #a53232; height: auto; min-height: 30px; line-height: 1.5; display: block; }
         .loader { display: inline-block; vertical-align: middle; margin-right: 10px; }
-        #correction-box { position: static; margin-top: 20px; padding: 16px; display: flex; flex-wrap: wrap; justify-content: center; animation: none; }
-        #correctionMessage { flex-basis: 100%; margin: 0; line-height: 1.5; }
+        #correction-box { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 20; width: min(520px, calc(100% - 24px)); max-height: 45vh; max-height: 45dvh; margin: 0; padding: 12px; display: flex; flex-wrap: wrap; justify-content: center; overflow-y: auto; overscroll-behavior: contain; animation: none; }
+        #correctionMessage { flex-basis: 100%; margin: 0; font-size: 14px; line-height: 1.35; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
         #correction-box button { max-width: 100%; min-height: 44px; }
         #retry-word-btn { background-color: #267a74; }
         #skip-word-btn { background-color: #bc3d3d; }
-        .modal-overlay { inset: 0; padding: 20px; }
-        .modal-content { width: 100%; padding: 50px 30px 30px; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); overflow-y: auto; overflow-wrap: anywhere; }
+        .modal-overlay { inset: 0; padding: 20px; overscroll-behavior: none; }
+        .modal-content { width: 100%; padding: 50px 30px 30px; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere; }
+        #incorrectWordsList { overscroll-behavior: contain; }
         .modal-close-btn { top: 8px; right: 12px; width: 44px; height: 44px; color: #bc3d3d; }
         .modal-content h2 { color: #af6200; margin-bottom: 20px; }
         .modal-content p { font-size: 1.1em; color: #526269; }
@@ -116,6 +120,11 @@
             #file-upload-area { padding: 25px 12px; }
             #okuma-alani { padding: 12px; border-width: 3px; }
             #baslatBtn { padding: 16px 20px; font-size: 18px; }
+            .reading-controls { top: 6px; gap: 6px; padding: 6px; }
+            .reading-controls #baslatBtn, .reading-controls #finishReadingBtn { flex: 1 1 100px; min-height: 46px; padding: 6px; font-size: 13px; }
+            .reading-controls #resetReadingBtn { flex: 1 1 100px; min-height: 46px; padding: 6px 10px; font-size: 13px; }
+            #correction-box { gap: 8px; padding: 8px; }
+            #correctionMessage { font-size: 13px; -webkit-line-clamp: 1; }
             .font-controls { justify-content: center; }
             .modal-overlay { padding: 10px; }
             .modal-content { padding: 50px 15px 25px; border-width: 5px; max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); }
@@ -150,17 +159,16 @@
             <button type="button" id="fontResetBtn" title="Varsayılan yazı boyutu" aria-label="Varsayılan yazı boyutuna dön">A</button>
         </div>
         
-        <div class="reading-controls">
+        <p id="finishReadingHelp">Okumayı Durdur ile mola verip devam edebilirsiniz. Bitir ve Sonucu Gör ile okumayı bitirip raporunuzu açabilirsiniz.</p>
+        <p id="microphoneHelp">Okumaya başlarken tarayıcının mikrofon iznine izin verin. Sesli okuma için konuşma tanımayı destekleyen bir tarayıcı gerekir.</p>
+        <div class="reading-controls" role="group" aria-label="Okuma kontrolleri">
             <button type="button" id="baslatBtn" aria-describedby="microphoneHelp" disabled><i class="fas fa-microphone" aria-hidden="true"></i>Okumaya Başla</button>
             <button type="button" id="finishReadingBtn" aria-describedby="finishReadingHelp" disabled>Bitir ve Sonucu Gör</button>
             <button type="button" id="resetReadingBtn" disabled>Metni Baştan Oku</button>
         </div>
-        <p id="finishReadingHelp">Okumayı Durdur ile mola verip devam edebilirsiniz. Bitir ve Sonucu Gör ile okumayı bitirip raporunuzu açabilirsiniz.</p>
-        <p id="microphoneHelp">Okumaya başlarken tarayıcının mikrofon iznine izin verin. Sesli okuma için konuşma tanımayı destekleyen bir tarayıcı gerekir.</p>
-
-        <div id="okuma-alani" aria-label="Okunacak metin"></div>
+        <div id="okuma-alani" aria-label="Okunacak metin" tabindex="-1"></div>
         
-        <div id="correction-box" role="group" aria-label="Hatalı kelime için seçenekler" hidden>
+        <div id="correction-box" role="group" aria-label="Hatalı kelime için seçenekler" aria-describedby="correctionMessage" hidden>
             <p id="correctionMessage"></p>
             <button type="button" id="retry-word-btn"><i class="fas fa-redo" aria-hidden="true"></i> Tekrar Oku</button>
             <button type="button" id="skip-word-btn">Atla <i class="fas fa-forward" aria-hidden="true"></i></button>
