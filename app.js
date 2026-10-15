@@ -38,6 +38,9 @@ export function initApp(doc = document, win = window) {
     const closeButton = get('modalKapatBtn');
     const retryIncorrect = get('retryIncorrectBtn');
     const restartButton = get('restartReadingBtn');
+    const readingControls = doc.querySelector('.reading-controls');
+    const modalContent = modal.querySelector('.modal-content');
+    const container = doc.querySelector('.container');
     const Recognition = win.SpeechRecognition || win.webkitSpeechRecognition;
     const supported = Boolean(Recognition) && win.isSecureContext;
     let uploading = false;
@@ -47,7 +50,9 @@ export function initApp(doc = document, win = window) {
     let displayedWords = [];
     let previousPhase;
     let previousCorrection = false;
+    let previousWordIndex = -1;
     let modalReturnFocus;
+    let modalScrollState;
     let engine;
 
     get('microphoneHelp').textContent = !win.isSecureContext
@@ -57,6 +62,89 @@ export function initApp(doc = document, win = window) {
             : 'Okumaya başlarken tarayıcının mikrofon iznine izin verin. Konuşma tanıma, tarayıcıya bağlı olarak internet bağlantısı gerektirebilir.';
 
     function announce(message) { status.textContent = message; }
+
+    function focusWithoutScroll(element) { element?.focus({ preventScroll: true }); }
+
+    function focusInPanel(element, panel) {
+        focusWithoutScroll(element);
+        const rect = element.getBoundingClientRect();
+        const bounds = panel.getBoundingClientRect();
+        // Keyboard navigation may scroll the panel, never the page behind it.
+        if (rect.bottom > bounds.bottom - 8) panel.scrollTop += rect.bottom - bounds.bottom + 8;
+        else if (rect.top < bounds.top + 8) panel.scrollTop += rect.top - bounds.top - 8;
+    }
+
+    function isVisibleControl(element) {
+        if (!element?.isConnected || element.disabled || element.closest('[hidden]')) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= win.innerHeight
+            && rect.left >= 0 && rect.right <= win.innerWidth;
+    }
+
+    function currentWord(snapshot = engine.snapshot()) {
+        return get(`kelime-${Math.min(snapshot.index, snapshot.words.length - 1)}`);
+    }
+
+    function revealCurrentWord(snapshot = engine.snapshot()) {
+        if (!modal.hidden) return;
+        const word = currentWord(snapshot);
+        if (!word) return;
+        const bar = readingControls.getBoundingClientRect();
+        const top = Math.max(12, Math.min(win.innerHeight / 2, bar.bottom + 8));
+        const bottom = correctionBox.hidden ? win.innerHeight - 12 : correctionBox.getBoundingClientRect().top - 8;
+        const rect = word.getBoundingClientRect();
+        // Only move enough to reveal this word. Never follow manual scrolling.
+        const delta = rect.top < top ? rect.top - top
+            : rect.bottom > bottom ? Math.min(rect.bottom - bottom, rect.top - top) : 0;
+        if (Math.abs(delta) > 1) win.scrollBy(0, delta);
+    }
+
+    function focusReadingControl() {
+        if (!modal.hidden) return;
+        focusWithoutScroll([startButton, finishButton, resetButton, currentWord()].find(isVisibleControl) || readingArea);
+    }
+
+    function rememberStyles(element, properties) {
+        return properties.map(property => [property, element.style.getPropertyValue(property), element.style.getPropertyPriority(property)]);
+    }
+
+    function restoreStyles(element, styles) {
+        for (const [property, value, priority] of styles) {
+            if (value) element.style.setProperty(property, value, priority);
+            else element.style.removeProperty(property);
+        }
+    }
+
+    function lockPageScroll() {
+        if (modalScrollState) return;
+        const scrollbarWidth = win.innerWidth - doc.documentElement.clientWidth;
+        modalScrollState = {
+            x: win.scrollX, y: win.scrollY, inert: container.inert,
+            body: rememberStyles(doc.body, ['position', 'top', 'left', 'width', 'overflow-x', 'overflow-y', 'padding-right']),
+            html: rememberStyles(doc.documentElement, ['overflow-x', 'overflow-y'])
+        };
+        // Fixed body also prevents touch scrolling on mobile browsers. Preserve
+        // the visual page offset, including existing inline styles and gutters.
+        const padding = parseFloat(win.getComputedStyle(doc.body).paddingRight) || 0;
+        doc.body.style.position = 'fixed';
+        doc.body.style.top = `${-modalScrollState.y}px`;
+        doc.body.style.left = `${-modalScrollState.x}px`;
+        doc.body.style.width = '100%';
+        doc.body.style.overflow = 'hidden';
+        if (scrollbarWidth > 0) doc.body.style.paddingRight = `${padding + scrollbarWidth}px`;
+        doc.documentElement.style.overflow = 'hidden';
+        container.inert = true;
+    }
+
+    function unlockPageScroll() {
+        if (!modalScrollState) return;
+        const saved = modalScrollState;
+        modalScrollState = null;
+        restoreStyles(doc.body, saved.body);
+        restoreStyles(doc.documentElement, saved.html);
+        container.inert = saved.inert;
+        win.scrollTo(saved.x, saved.y);
+    }
 
     function speakWord(word) {
         if (uploading || ['starting', 'listening', 'stopping'].includes(engine.snapshot().phase)) return;
@@ -103,11 +191,11 @@ export function initApp(doc = document, win = window) {
     function closeResults(restoreFocus = true) {
         modal.hidden = true;
         modal.classList.remove('visible');
-        doc.querySelector('.container').inert = false;
+        unlockPageScroll();
         if (restoreFocus) {
-            const target = modalReturnFocus?.isConnected && modalReturnFocus.tabIndex >= 0 && !modalReturnFocus.disabled
-                && modalReturnFocus.getClientRects().length > 0 ? modalReturnFocus : startButton;
-            target.focus();
+            const target = [modalReturnFocus, startButton, currentWord(), finishButton, resetButton]
+                .find(element => element?.tabIndex >= 0 && isVisibleControl(element));
+            focusWithoutScroll(target || readingArea);
         }
     }
 
@@ -126,10 +214,12 @@ export function initApp(doc = document, win = window) {
         get('incorrectWordsContainer').hidden = practiceWords.length === 0;
         get('incorrectWordsList').textContent = practiceWords.join(', ');
         modalReturnFocus = doc.activeElement;
+        lockPageScroll();
         modal.hidden = false;
         modal.classList.add('visible');
-        doc.querySelector('.container').inert = true;
-        closeButton.focus();
+        modalContent.scrollTop = 0;
+        get('incorrectWordsList').scrollTop = 0;
+        focusWithoutScroll(closeButton);
     }
 
     function render(snapshot) {
@@ -174,13 +264,16 @@ export function initApp(doc = document, win = window) {
                 unsupported: get('microphoneHelp').textContent
             };
             announce(messages[snapshot.phase] || messages.ready);
-            if (correction && !previousCorrection) retryButton.focus();
+            if ((correction && !previousCorrection) || (snapshot.phase === 'listening'
+                && (previousPhase !== 'listening' || previousWordIndex !== snapshot.index))) revealCurrentWord(snapshot);
+            if (correction && !previousCorrection) focusInPanel(retryButton, correctionBox);
             if (['completed', 'finished-early'].includes(snapshot.phase) && previousPhase !== snapshot.phase) showResults(snapshot);
             // An upload may temporarily hide a pending report. Do not consume
             // its terminal transition unless the report can actually be shown.
             previousPhase = snapshot.phase;
         }
         previousCorrection = correction;
+        previousWordIndex = snapshot.index;
     }
 
     engine = new ReadingEngine({
@@ -197,7 +290,8 @@ export function initApp(doc = document, win = window) {
     resetButton.addEventListener('click', () => {
         closeResults(false);
         engine.load(engine.snapshot().words);
-        startButton.focus();
+        revealCurrentWord();
+        focusReadingControl();
     });
     finishButton.addEventListener('click', () => {
         win.speechSynthesis?.cancel();
@@ -208,18 +302,25 @@ export function initApp(doc = document, win = window) {
         win.speechSynthesis?.cancel();
         engine.load(engine.snapshot().words);
         if (supported) engine.start();
-        // The start button is disabled while the microphone starts.
-        (startButton.disabled ? finishButton : startButton).focus();
+        revealCurrentWord();
+        focusReadingControl();
     });
-    retryButton.addEventListener('click', () => { win.speechSynthesis?.cancel(); engine.retryWord(); });
-    skipButton.addEventListener('click', () => { win.speechSynthesis?.cancel(); engine.skipWord(); });
+    retryButton.addEventListener('click', () => {
+        win.speechSynthesis?.cancel(); engine.retryWord();
+        revealCurrentWord(); focusReadingControl();
+    });
+    skipButton.addEventListener('click', () => {
+        win.speechSynthesis?.cancel(); engine.skipWord();
+        revealCurrentWord(); focusReadingControl();
+    });
     closeButton.addEventListener('click', () => closeResults());
     retryIncorrect.addEventListener('click', () => {
         const snapshot = engine.snapshot();
         const words = snapshot.words.filter((_, i) => ['incorrect', 'skipped'].includes(snapshot.outcomes[i]));
         closeResults(false);
         engine.load(words);
-        startButton.focus();
+        revealCurrentWord();
+        focusReadingControl();
     });
     modal.addEventListener('keydown', event => {
         if (event.key === 'Escape') { event.preventDefault(); closeResults(); }
@@ -227,8 +328,8 @@ export function initApp(doc = document, win = window) {
         const focusable = [...modal.querySelectorAll('button')].filter(button => !button.disabled && !button.closest('[hidden]'));
         const first = focusable[0];
         const last = focusable.at(-1);
-        if (event.shiftKey && doc.activeElement === first) { event.preventDefault(); last.focus(); }
-        else if (!event.shiftKey && doc.activeElement === last) { event.preventDefault(); first.focus(); }
+        if (event.shiftKey && doc.activeElement === first) { event.preventDefault(); focusInPanel(last, modalContent); }
+        else if (!event.shiftKey && doc.activeElement === last) { event.preventDefault(); focusInPanel(first, modalContent); }
     });
 
     function applyFontSize(size) { currentFontSize = size; readingArea.style.fontSize = `${size}px`; }

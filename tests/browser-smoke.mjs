@@ -111,6 +111,65 @@ async function beginReading(page) {
     await speechEvent(page, 'start');
 }
 
+// These fixtures are deliberately longer than both desktop and mobile viewports.
+// They contain no documents, names or audio from real children.
+const longReadingWords = Array.from({ length: 600 }, (_, index) => ['güneş', 'bulut', 'çiçek', 'ormanda'][index % 4]);
+
+async function viewState(page, ids = []) {
+    return page.evaluate(ids => {
+        const bounds = element => {
+            const { top, bottom, left, right, width, height } = element.getBoundingClientRect();
+            return { top, bottom, left, right, width, height };
+        };
+        return {
+            scrollY: window.scrollY,
+            width: window.innerWidth,
+            height: window.innerHeight,
+            active: document.activeElement.id,
+            activeDisabled: Boolean(document.activeElement.disabled),
+            activeHidden: Boolean(document.activeElement.closest('[hidden], [inert]')),
+            activeBounds: bounds(document.activeElement),
+            elements: Object.fromEntries(ids.map(id => [id, bounds(document.getElementById(id))]))
+        };
+    }, ids);
+}
+
+function assertInViewport(bounds, state, message) {
+    assert.ok(bounds.width > 0 && bounds.height > 0, `${message}: has visible dimensions`);
+    assert.ok(bounds.left >= -1 && bounds.right <= state.width + 1, `${message}: fits viewport width`);
+    assert.ok(bounds.top >= -1 && bounds.bottom <= state.height + 1, `${message}: fits viewport height`);
+}
+
+async function centerWord(page, index) {
+    await page.locator(`#kelime-${index}`).evaluate(word => word.scrollIntoView({ block: 'center', behavior: 'instant' }));
+}
+
+async function expectVisibleCorrection(page, index, beforeY) {
+    const state = await viewState(page, [`kelime-${index}`, 'correction-box', 'retry-word-btn', 'skip-word-btn']);
+    assert.ok(Math.abs(state.scrollY - beforeY) <= 32,
+        `a word already in view must not jump to the document end (${beforeY} -> ${state.scrollY}; ${JSON.stringify(state.elements)})`);
+    assert.equal(state.active, 'retry-word-btn');
+    assert.equal(state.activeHidden, false);
+    for (const id of [`kelime-${index}`, 'retry-word-btn', 'skip-word-btn']) {
+        assertInViewport(state.elements[id], state, id);
+    }
+    const word = state.elements[`kelime-${index}`];
+    const box = state.elements['correction-box'];
+    assert.ok(box.bottom <= word.top + 1 || box.top >= word.bottom - 1,
+        `correction controls must not cover the failed word (${JSON.stringify({ word, box })})`);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    return state;
+}
+
+async function expectVisibleFocusAndWord(page, index) {
+    const state = await viewState(page, [`kelime-${index}`]);
+    assert.equal(state.activeHidden, false, 'focus does not remain inside hidden correction controls');
+    assert.equal(state.activeDisabled, false, 'the active control is enabled');
+    assertInViewport(state.activeBounds, state, 'active reading control');
+    assertInViewport(state.elements[`kelime-${index}`], state, 'current reading word');
+    return state;
+}
+
 test('static ES modules load; DOCX upload text and filename cannot inject HTML', async t => {
     const text = '<img src=x onerror=alert(1)> Merhaba & dünya';
     const page = await setup(t, { text });
@@ -563,4 +622,193 @@ test('finish is disabled during upload, fits 320px and is usable with keyboard',
     assert.equal(await page.locator('#sonucModal').isVisible(), false);
     assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '0');
     assert.equal(await page.evaluate(() => window.__recognitions.length), 1);
+});
+
+for (const viewport of [{ width: 1000, height: 900 }, { width: 320, height: 480 }, { width: 320, height: 360 }]) {
+    for (const index of [300, 558]) {
+        test(`long document correction at word ${index} keeps word, keyboard controls and focus visible at ${viewport.width}x${viewport.height}`, async t => {
+            const page = await setup(t, { text: longReadingWords.join(' '), viewport });
+            await upload(page);
+            await beginReading(page);
+            await speechEvent(page, 'result', longReadingWords.slice(0, index).join(' '));
+            await centerWord(page, index);
+            const before = await viewState(page, [`kelime-${index}`]);
+            assertInViewport(before.elements[`kelime-${index}`], before, 'word before failure');
+            assert.ok(before.scrollY > viewport.height, 'fixture reaches the middle or end of a long page');
+
+            await speechEvent(page, 'result', 'yanlış');
+            await expectVisibleCorrection(page, index, before.scrollY);
+            await speechEvent(page, 'end');
+            assert.equal(await page.evaluate(() => document.activeElement.id), 'retry-word-btn');
+            const beforeManualScroll = await page.evaluate(() => window.scrollY);
+            await page.mouse.move(2, viewport.height / 2);
+            await page.mouse.wheel(0, -250);
+            await page.waitForFunction(beforeY => window.scrollY < beforeY, beforeManualScroll);
+            assert.equal(await page.locator('#correction-box').isVisible(), true,
+                'manual scrolling remains available while correction controls stay accessible');
+            await centerWord(page, index);
+            assert.equal(await page.evaluate(() => document.activeElement.id), 'retry-word-btn');
+            // The focused correction control is already in view. Keyboard
+            // activation cannot hide a scroll bug through Playwright auto-scroll.
+            await page.keyboard.press('Enter');
+            assert.equal(await page.locator('#correction-box').isVisible(), false);
+            await speechEvent(page, 'start');
+            const beforeNextCorrection = await expectVisibleFocusAndWord(page, index);
+            assert.equal(await page.locator(`#kelime-${index}`).getAttribute('class'), 'word-button');
+
+            await speechEvent(page, 'result', `${longReadingWords[index]} yanlış`);
+            await expectVisibleCorrection(page, index + 1, beforeNextCorrection.scrollY);
+            await speechEvent(page, 'end');
+            await page.keyboard.press('Tab');
+            assert.equal(await page.evaluate(() => document.activeElement.id), 'skip-word-btn');
+            const beforeSkip = await viewState(page);
+            assertInViewport(beforeSkip.activeBounds, beforeSkip, 'skip before keyboard activation');
+            await page.keyboard.press('Enter');
+            await speechEvent(page, 'start');
+            const afterSkip = await expectVisibleFocusAndWord(page, index + 2);
+            assert.ok(Math.abs(afterSkip.scrollY - beforeSkip.scrollY) < viewport.height,
+                'retry and skip stay near the current reading position');
+            assert.equal(await page.locator(`#kelime-${index + 1}`).getAttribute('class'), 'word-button skipped');
+            assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuetext'), `${index + 2} / 600 kelime`);
+            assert.equal(await page.locator('#sonucModal').isVisible(), false);
+        });
+    }
+}
+
+for (const viewport of [{ width: 1000, height: 600 }, { width: 320, height: 480 }, { width: 320, height: 360 }]) {
+    test(`long early report isolates scrolling, restores position and restarts visibly at ${viewport.width}x${viewport.height}`, async t => {
+        // Failed synthetic words make the actual practice list long; the test
+        // does not enlarge the dialog or inject extra report nodes artificially.
+        const words = Array.from({ length: 600 }, (_, index) => `masaldakiküçükkaplumbağa${index}`);
+        const page = await setup(t, { text: words.join(' '), viewport });
+        await upload(page);
+        await beginReading(page);
+        await page.evaluate(() => {
+            for (let index = 0; index < 80; index++) {
+                const recognition = window.__recognitions.at(-1);
+                const result = [{ transcript: 'yanlış' }]; result.isFinal = true;
+                recognition.onresult({ resultIndex: 0, results: [result] });
+                recognition.onend();
+                document.getElementById('skip-word-btn').click();
+                window.__recognitions.at(-1).onstart();
+            }
+        });
+        await speechEvent(page, 'result', words.slice(80, 300).join(' '));
+        await centerWord(page, 300);
+        const beforeFailure = await viewState(page);
+        await speechEvent(page, 'result', 'yanlış');
+        await expectVisibleCorrection(page, 300, beforeFailure.scrollY);
+        await speechEvent(page, 'end');
+        const beforeReport = await viewState(page, ['kelime-300']);
+        // Dispatch from the existing reading position so the automation itself
+        // cannot scroll the offscreen finish button before the report opens.
+        await page.evaluate(() => document.getElementById('finishReadingBtn').click());
+        await expectReport(page, { total: 600, correct: 220, incorrect: 81, skipped: 80, unread: 299, accuracy: 37 });
+        await page.locator('.modal-content').evaluate(async content => {
+            await Promise.all(content.getAnimations().map(animation => animation.finished));
+        });
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'modalKapatBtn');
+        assert.equal(await page.locator('.modal-content').evaluate(content => content.scrollTop), 0);
+        const report = await viewState(page);
+        const bounds = await page.locator('.modal-content').boundingBox();
+        assertInViewport({ ...bounds, left: bounds.x, right: bounds.x + bounds.width, top: bounds.y, bottom: bounds.y + bounds.height }, report, 'centered report');
+        assert.ok(Math.abs(bounds.x + bounds.width / 2 - viewport.width / 2) <= 2, 'report is horizontally centered');
+        assert.ok(Math.abs(bounds.y + bounds.height / 2 - viewport.height / 2) <= 2, 'report is vertically centered');
+        const maxScroll = await page.locator('.modal-content').evaluate(content => content.scrollHeight - content.clientHeight);
+        assert.ok(maxScroll > 100, `actual long report scrolls inside the dialog (${maxScroll}px available)`);
+        await page.keyboard.press('Shift+Tab');
+        const wrappedLast = await viewState(page);
+        assert.equal(wrappedLast.active, 'restartReadingBtn');
+        assertInViewport(wrappedLast.activeBounds, wrappedLast, 'last report action after reverse Tab wrap');
+        assert.equal(wrappedLast.scrollY, report.scrollY, 'keyboard focus scrolls only inside the report');
+        await page.keyboard.press('Tab');
+        const wrappedFirst = await viewState(page);
+        assert.equal(wrappedFirst.active, 'modalKapatBtn');
+        assertInViewport(wrappedFirst.activeBounds, wrappedFirst, 'report close after forward Tab wrap');
+        assert.equal(wrappedFirst.scrollY, report.scrollY);
+        await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        await page.mouse.wheel(0, 250);
+        await page.waitForFunction(() => document.querySelector('.modal-content').scrollTop > 0);
+        assert.equal(await page.evaluate(() => window.scrollY), report.scrollY, 'scrolling the report does not scroll the page');
+
+        await page.locator('.modal-content').evaluate(content => { content.scrollTop = content.scrollHeight; });
+        await page.mouse.wheel(0, 350);
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => window.scrollY), report.scrollY, 'scrolling past the dialog bottom does not chain to the page');
+        await page.mouse.move(2, viewport.height / 2);
+        await page.mouse.wheel(0, 350);
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => window.scrollY), report.scrollY, 'wheel input outside the report keeps the page locked');
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#sonucModal').isVisible(), false);
+        const afterClose = await viewState(page, ['kelime-300']);
+        assert.ok(Math.abs(afterClose.scrollY - beforeReport.scrollY) <= 2, 'closing restores the previous document scroll position');
+        assert.equal(afterClose.activeHidden, false);
+        assert.equal(afterClose.activeDisabled, false);
+        assert.notEqual(afterClose.active, 'modalKapatBtn');
+        assertInViewport(afterClose.elements['kelime-300'], afterClose, 'failed word after closing report');
+        assert.equal(await page.evaluate(() => document.querySelector('.container').inert), false);
+
+        // A new reading can reopen the same dialog after it was scrolled. The
+        // report must always start at its heading, rather than its prior offset.
+        await page.evaluate(() => document.getElementById('baslatBtn').click());
+        await speechEvent(page, 'start');
+        await speechEvent(page, 'result', words.slice(0, 300).join(' '));
+        await centerWord(page, 300);
+        const secondBeforeReport = await page.evaluate(() => window.scrollY);
+        await page.evaluate(() => document.getElementById('finishReadingBtn').click());
+        await speechEvent(page, 'end');
+        await expectReport(page, { total: 600, correct: 300, incorrect: 0, skipped: 0, unread: 300, accuracy: 50 });
+        assert.equal(await page.locator('.modal-content').evaluate(content => content.scrollTop), 0);
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'modalKapatBtn');
+        await page.keyboard.press('Escape');
+        assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - secondBeforeReport) <= 2);
+
+        // Reopen once more and use the actual report restart action.
+        await page.evaluate(() => document.getElementById('baslatBtn').click());
+        await speechEvent(page, 'start');
+        await speechEvent(page, 'result', words.slice(0, 300).join(' '));
+        await centerWord(page, 300);
+        await page.evaluate(() => document.getElementById('finishReadingBtn').click());
+        await speechEvent(page, 'end');
+        await page.locator('#restartReadingBtn').click();
+        assert.equal(await page.locator('#sonucModal').isVisible(), false);
+        assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '0');
+        const restarted = await expectVisibleFocusAndWord(page, 0);
+        assert.equal(await page.locator('#kelime-0').getAttribute('aria-current'), 'true');
+        assert.ok(restarted.scrollY < beforeReport.scrollY, 'restart returns to the beginning of the document');
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        // Background scrolling becomes available again after either close or restart.
+        const beforeWheel = await page.evaluate(() => window.scrollY);
+        await page.mouse.move(viewport.width / 2, viewport.height - 5);
+        await page.mouse.wheel(0, 250);
+        await page.waitForFunction(before => window.scrollY > before, beforeWheel);
+    });
+}
+
+test('report scroll lock restores existing inline overflow values and priorities after closing', async t => {
+    const page = await setup(t, { text: longReadingWords.join(' '), viewport: { width: 1000, height: 900 } });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', longReadingWords.slice(0, 300).join(' '));
+    await centerWord(page, 300);
+    const readStyles = () => page.evaluate(() => ['body', 'html'].map(selector => {
+        const { style } = document.querySelector(selector);
+        return Object.fromEntries(['overflow-x', 'overflow-y', 'position', 'top', 'left', 'width', 'padding-right']
+            .map(property => [property, [style.getPropertyValue(property), style.getPropertyPriority(property)]]));
+    }));
+    await page.evaluate(() => {
+        document.body.style.setProperty('overflow-x', 'hidden', 'important');
+        document.body.style.setProperty('overflow-y', 'visible');
+        document.documentElement.style.setProperty('overflow-x', 'clip');
+        document.documentElement.style.setProperty('overflow-y', 'scroll', 'important');
+    });
+    const previousStyles = await readStyles();
+    const previousY = await page.evaluate(() => window.scrollY);
+    await page.evaluate(() => document.getElementById('finishReadingBtn').click());
+    await speechEvent(page, 'end');
+    assert.equal(await page.locator('#sonucModal').isVisible(), true);
+    await page.keyboard.press('Escape');
+    assert.deepEqual(await readStyles(), previousStyles, 'scroll locking preserves individual overflow priorities and pre-existing styles');
+    assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - previousY) <= 2);
 });
