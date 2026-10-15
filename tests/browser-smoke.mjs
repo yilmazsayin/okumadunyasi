@@ -62,8 +62,34 @@ async function setup(t, { text = 'Merhaba dünya', supported = true, response, v
 }
 
 async function upload(page, name = 'yapay-metin.docx') {
-    await page.locator('#file-input').setInputFiles({ name, mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from('synthetic upload fixture; response is mocked') });
+    await page.locator('#file-input').setInputFiles({ name, mimeType: /\.pdf$/i.test(name) ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from('synthetic upload fixture; response is mocked') });
     await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+}
+
+// Check actual layout as well as the attribute: author CSS must not turn hidden
+// progress indicators into visible bars or leave blank space in the document.
+async function expectNoLayout(page, ...ids) {
+    for (const id of ids) {
+        const locator = page.locator(`#${id}`);
+        assert.equal(await locator.isVisible(), false, `${id} is not visible`);
+        assert.deepEqual(await locator.evaluate(element => ({
+            hidden: element.hidden,
+            display: getComputedStyle(element).display,
+            rects: element.getClientRects().length,
+            height: element.getBoundingClientRect().height
+        })), { hidden: true, display: 'none', rects: 0, height: 0 }, `${id} does not occupy layout space`);
+    }
+}
+
+async function expectLaidOut(page, ...ids) {
+    for (const id of ids) {
+        const locator = page.locator(`#${id}`);
+        assert.equal(await locator.isVisible(), true, `${id} is visible`);
+        assert.equal(await locator.evaluate(element => !element.hidden
+            && getComputedStyle(element).display !== 'none'
+            && element.getClientRects().length > 0
+            && element.getBoundingClientRect().height > 0), true, `${id} occupies layout space`);
+    }
 }
 
 async function event(page, type, value) {
@@ -290,7 +316,7 @@ test('invalid extension, empty file, and oversize file never issue upload reques
     let requests = 0;
     const page = await setup(t, { response: route => { requests++; return route.fulfill({ json: { text: 'Merhaba' } }); } });
     for (const [name, buffer, expected] of [
-        ['metin.pdf', Buffer.from('test'), /\.docx/],
+        ['metin.txt', Buffer.from('test'), /\.docx|\.pdf/],
         ['bos.docx', Buffer.alloc(0), /boş/],
         ['buyuk.docx', Buffer.alloc(10 * 1024 * 1024 + 1), /10 MB/]
     ]) {
@@ -350,6 +376,428 @@ test('late upload response cannot replace newer document', async t => {
     await upload(page, 'iki.docx');
     releaseFirst();
     assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Yeni metin');
+});
+
+// PDF/DOCX transport and waiting UX use synthetic fixtures and intercepted
+// responses. These checks do not claim to validate Render or a real PDF parser.
+const scannedPdfMessage = "Bu PDF'de okunabilir metin bulunamadı. Taranmış PDF'ler henüz desteklenmiyor.";
+
+async function installPausedClock(page) {
+    const start = new Date('2026-01-01T12:00:00Z');
+    await page.clock.install({ time: start });
+    // install() initially follows wall time. Pause before selecting the file so
+    // network/assertion latency cannot move an 8-second boundary assertion.
+    await page.clock.pauseAt(new Date(start.getTime() + 1000));
+}
+
+async function traceUploadSignals(page) {
+    await page.evaluate(() => {
+        const originalFetch = window.fetch.bind(window);
+        window.__uploadCalls = [];
+        window.fetch = (url, options) => {
+            const call = { url, method: options.method, aborted: options.signal.aborted };
+            window.__uploadCalls.push(call);
+            options.signal.addEventListener('abort', () => { call.aborted = true; });
+            return originalFetch(url, options);
+        };
+    });
+}
+
+for (const viewport of [{ width: 1000, height: 900 }, { width: 320, height: 360 }]) {
+    test(`initial HTML keeps reading and upload indicators out of layout before JavaScript (${viewport.width}px)`, async t => {
+        const context = await browser.newContext({ viewport, javaScriptEnabled: false });
+        t.after(() => context.close());
+        const page = await context.newPage();
+        await page.route('https://**/*', route => route.abort());
+        await page.goto(baseURL);
+        await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadFeedback', 'uploadProgress', 'uploadWaitHint');
+        assert.match(await page.locator('#uploadHint').textContent(), /10 MB/);
+        assert.doesNotMatch(await page.locator('#uploadHint').textContent(), /MiB/);
+    });
+
+    test(`initial JavaScript leaves both progress indicators hidden (${viewport.width}px)`, async t => {
+        const page = await setup(t, { viewport });
+        await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadFeedback', 'uploadProgress', 'uploadWaitHint');
+        assert.match(await page.locator('#uploadHint').textContent(), /10 MB/);
+    });
+}
+
+for (const extension of ['PDF', 'DOCX']) {
+    test(`${extension} selection keeps the existing multipart API and reading engine`, async t => {
+        const requests = [];
+        const page = await setup(t, { response: route => {
+            requests.push({ url: route.request().url(), method: route.request().method(), body: route.request().postData() });
+            return route.fulfill({ json: { text: 'Merhaba dünya' } });
+        } });
+        assert.equal(await page.locator('#uploadFeedback').isVisible(), false);
+        assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+        const accept = await page.locator('#file-input').getAttribute('accept');
+        assert.match(accept, /\.pdf/);
+        assert.match(accept, /\.docx/);
+        // Deliberately inaccurate MIME: extension checks must not depend on it.
+        await page.locator('#file-input').setInputFiles({ name: `yapay-metin.${extension}`, mimeType: 'text/plain', buffer: Buffer.from('synthetic upload') });
+        await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].url, 'https://okumadunyasi-api.onrender.com/upload');
+        assert.equal(requests[0].method, 'POST');
+        assert.ok(requests[0].body.includes(`name="file"; filename="yapay-metin.${extension}"`));
+        assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+        assert.match(await page.locator('#uploadStatus').textContent(), /Metin okumaya hazır/);
+        await expectLaidOut(page, 'progressContainer', 'progressText', 'uploadFeedback');
+        await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+        assert.match(await page.locator('#uploadFileInfo').textContent(), / MB$/);
+        assert.doesNotMatch(await page.locator('#uploadFileInfo').textContent(), /MiB/);
+        await beginReading(page);
+        await speechEvent(page, 'result', 'MERHABA DÜNYA');
+        await speechEvent(page, 'end');
+        await expectReport(page, { total: 2, correct: 2, incorrect: 0, skipped: 0, unread: 0, accuracy: 100 });
+    });
+}
+
+test('PDF text and filename remain literal text; no backend HTML executes', async t => {
+    const page = await setup(t, { text: '<img src=x onerror=alert(1)> güneş & bulut' });
+    await upload(page, '<svg onload=alert(1)>.pdf');
+    assert.equal(await page.locator('#okuma-alani img, #okuma-alani svg, #durum svg, #uploadFeedback svg').count(), 0);
+    assert.match(await page.locator('#okuma-alani').textContent(), /<img/);
+    assert.match(await page.locator('#durum').textContent(), /<svg onload=alert\(1\)>.pdf/);
+    assert.equal(await page.locator('#baslatBtn').isDisabled(), false);
+});
+
+test('PDF drag and drop uses the existing upload flow and keyboard chooser accepts both formats', async t => {
+    let requests = 0;
+    const page = await setup(t, { response: route => { requests++; return route.fulfill({ json: { text: 'Mavi kuş' } }); } });
+    const [chooser] = await Promise.all([
+        page.waitForEvent('filechooser'),
+        page.locator('#file-upload-area').press('Space')
+    ]);
+    assert.equal(chooser.isMultiple(), false);
+    await page.evaluate(() => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File(['synthetic PDF fixture'], 'yapay.PDF', { type: 'application/pdf' }));
+        document.getElementById('file-upload-area').dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    });
+    await page.waitForFunction(() => document.getElementById('uploadFeedback').dataset.state === 'ready');
+    assert.equal(requests, 1);
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Mavi kuş');
+});
+
+for (const [status, error, expected = error] of [
+    [400, 'Bu PDF parola ile korunuyor. Parolasız bir PDF seçin.'],
+    [413, 'Dosya çok büyük. En fazla 10 MiB boyutunda bir dosya seçin.', 'Dosya çok büyük. En fazla 10 MB boyutunda bir dosya seçin.'],
+    [422, 'PDF dosyasında seçilebilir metin bulunamadı. Taranmış belgeler için OCR desteği henüz yok.', scannedPdfMessage],
+    [500, 'Dosya şu anda işlenemedi. Lütfen yeniden deneyin.'],
+    [400, 'PDF dosyası bozuk veya geçersiz. Başka bir dosya seçin.']
+]) {
+    test(`PDF HTTP ${status} JSON error is readable, safely rendered and recoverable: ${error}`, async t => {
+        let requests = 0;
+        const page = await setup(t, { response: route => ++requests === 1
+            ? route.fulfill({ status, json: { error } })
+            : route.fulfill({ json: { text: 'Yeniden deneyelim' } }) });
+        await upload(page, 'yapay.pdf');
+        assert.ok((await page.locator('#durum').textContent()).includes(expected));
+        assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'error');
+        assert.equal(await page.locator('#file-upload-area').getAttribute('aria-busy'), 'false');
+        assert.equal(await page.locator('#baslatBtn').isDisabled(), true);
+        await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadProgress', 'uploadWaitHint');
+        await expectLaidOut(page, 'uploadFeedback');
+        assert.doesNotMatch(await page.locator('#uploadStatus').textContent(), /MiB/);
+        await upload(page, 'ikinci-yapay.pdf');
+        assert.equal(await page.locator('#baslatBtn').isDisabled(), false);
+        assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+    });
+}
+
+test('backend JSON error HTML is shown literally while non-JSON error bodies use a safe fallback', async t => {
+    let requests = 0;
+    const literalError = '<img src=x onerror=alert(1)> Yapay hata';
+    const page = await setup(t, { response: route => ++requests === 1
+        ? route.fulfill({ status: 422, json: { error: literalError } })
+        : route.fulfill({ status: 500, contentType: 'text/html', body: '<html><h1>private synthetic gateway detail</h1></html>' }) });
+    await upload(page, 'bir.pdf');
+    assert.ok((await page.locator('#durum').textContent()).includes(literalError));
+    assert.equal(await page.locator('#durum img, #uploadFeedback img').count(), 0);
+    await upload(page, 'iki.pdf');
+    assert.match(await page.locator('#durum').textContent(), /işlenemedi|sunucu|Sunucu/);
+    assert.doesNotMatch(await page.locator('#durum').textContent(), /private synthetic|<html>/);
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'error');
+});
+
+test('empty PDF text gets the scanned PDF explanation; malformed successful payloads never start reading', async t => {
+    let requests = 0;
+    const payloads = [
+        { json: { text: '' } }, { json: { text: ' \n\t ' } },
+        { json: { text: null } }, { json: {} }, { body: 'not JSON' },
+        { json: { text: '... — !!!' } }
+    ];
+    const page = await setup(t, { response: route => route.fulfill({ status: 200, ...payloads[requests++] }) });
+    for (let index = 0; index < payloads.length; index++) {
+        await upload(page, `gecersiz-${index}.pdf`);
+        const message = await page.locator('#durum').textContent();
+        if (index < 2) assert.ok(message.includes(scannedPdfMessage));
+        else assert.match(message, /metin|yanıt|kelime/);
+        assert.equal(await page.locator('#baslatBtn').isDisabled(), true);
+        assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'error');
+        assert.equal(await page.locator('.word-button').count(), 0);
+    }
+});
+
+test('pending upload shows real elapsed time and delayed Render help without inventing a percentage', async t => {
+    let release;
+    let received;
+    const pending = new Promise(resolve => { received = resolve; });
+    const page = await setup(t, { response: async route => {
+        await new Promise(resolve => { release = resolve; received(); });
+        await route.fulfill({ json: { text: 'Hazır metin' } });
+    } });
+    await installPausedClock(page);
+    await traceUploadSignals(page);
+    await page.locator('#file-input').setInputFiles({ name: 'bekleyen.pdf', mimeType: 'application/pdf', buffer: Buffer.from('synthetic pending upload') });
+    await pending;
+    assert.equal(await page.locator('#file-upload-area').getAttribute('aria-busy'), 'true');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'busy');
+    assert.equal(await page.locator('#uploadStatus').getAttribute('role'), 'status');
+    assert.match(await page.locator('#uploadStatus').textContent(), /^Dosya gönderiliyor\. Sunucudan yanıt bekleniyor/);
+    const progress = page.locator('#uploadProgress');
+    await expectLaidOut(page, 'uploadFeedback', 'uploadProgress');
+    await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadWaitHint');
+    assert.equal(await progress.getAttribute('role'), 'progressbar');
+    assert.equal(await progress.getAttribute('aria-valuenow'), null);
+    assert.doesNotMatch(await page.locator('#uploadFeedback').textContent(), /%\s*\d|\d\s*%/);
+    const initiallyElapsed = await page.locator('#uploadElapsed').textContent();
+    await page.clock.runFor(7_999);
+    assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+    await page.clock.runFor(1);
+    assert.equal(await page.locator('#uploadWaitHint').isVisible(), true);
+    assert.match(await page.locator('#uploadWaitHint').textContent(), /Render|sunucu/i);
+    assert.notEqual(await page.locator('#uploadElapsed').textContent(), initiallyElapsed);
+    assert.match(await page.locator('#uploadElapsed').textContent(), /8/);
+    assert.equal(await page.locator('#baslatBtn').isDisabled(), true);
+    assert.equal(await page.locator('#finishReadingBtn').isDisabled(), true);
+    release();
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+    await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+    await expectLaidOut(page, 'progressContainer', 'progressText');
+    const stoppedElapsed = await page.locator('#uploadElapsed').textContent();
+    await page.clock.runFor(12_000);
+    assert.equal(await page.locator('#uploadWaitHint').isVisible(), false, 'a completed upload cannot show a late waiting hint');
+    assert.equal(await page.locator('#uploadElapsed').textContent(), stoppedElapsed, 'elapsed timer stops on completion');
+    assert.deepEqual(await page.evaluate(() => window.__uploadCalls.map(call => call.aborted)), [false]);
+});
+
+test('response parsing has a truthful processing state before the extracted text becomes ready', async t => {
+    const page = await setup(t);
+    await page.evaluate(() => {
+        window.__uploadPhases = [];
+        const feedback = document.getElementById('uploadFeedback');
+        new MutationObserver(records => {
+            for (const record of records) if (record.oldValue) window.__uploadPhases.push(record.oldValue);
+        }).observe(feedback, { attributes: true, attributeFilter: ['data-phase'], attributeOldValue: true });
+        window.fetch = async () => ({
+            ok: true,
+            status: 200,
+            json: () => new Promise(resolve => { window.__releaseParsedText = () => resolve({ text: 'Hazırlanan metin' }); })
+        });
+    });
+    await page.locator('#file-input').setInputFiles({ name: 'islenen.pdf', mimeType: 'application/pdf', buffer: Buffer.from('synthetic processing fixture') });
+    await page.waitForFunction(() => document.getElementById('uploadFeedback').dataset.phase === 'processing');
+    assert.equal(await page.locator('#file-upload-area').getAttribute('aria-busy'), 'true');
+    assert.match(await page.locator('#uploadStatus').textContent(), /^Metin hazırlanıyor/);
+    assert.equal(await page.locator('#baslatBtn').isDisabled(), true);
+    assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+    assert.deepEqual(await page.evaluate(() => window.__uploadPhases), ['preparing', 'sending']);
+    await page.evaluate(() => window.__releaseParsedText());
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Hazırlanan metin');
+});
+
+test('an already queued old fetch completion is ignored even when its source fails to honor abort', async t => {
+    const page = await setup(t);
+    await page.evaluate(() => {
+        window.__queuedUploads = [];
+        window.fetch = (url, options) => new Promise(resolve => {
+            const queued = {
+                aborted: options.signal.aborted,
+                resolve: text => resolve({ ok: true, status: 200, json: async () => ({ text }) })
+            };
+            options.signal.addEventListener('abort', () => { queued.aborted = true; });
+            // Deliberately keep this promise alive after abort, to model an
+            // already queued callback and verify the request-number guard.
+            window.__queuedUploads.push(queued);
+        });
+    });
+    for (const name of ['eski.pdf', 'yeni.pdf']) {
+        await page.locator('#file-input').setInputFiles({ name, mimeType: 'application/pdf', buffer: Buffer.from(name) });
+    }
+    assert.deepEqual(await page.evaluate(() => window.__queuedUploads.map(call => call.aborted)), [true, false]);
+    await page.evaluate(() => window.__queuedUploads[1].resolve('Yeni kuş'));
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    await page.evaluate(async () => {
+        window.__queuedUploads[0].resolve('Eski bulut');
+        await Promise.resolve();
+        await Promise.resolve();
+    });
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Yeni kuş');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+    assert.match(await page.locator('#uploadStatus').textContent(), /yeni\.pdf/);
+});
+
+test('an old JSON body that completes after the new upload cannot change its document or status', async t => {
+    const page = await setup(t);
+    await page.evaluate(() => {
+        window.__pendingUploadBodies = [];
+        window.fetch = async (url, options) => ({
+            ok: true, status: 200,
+            json: () => new Promise(resolve => {
+                // Model a response body callback already queued before abort.
+                window.__pendingUploadBodies.push({ signal: options.signal, resolve });
+            })
+        });
+    });
+    for (const [index, name] of ['eski.pdf', 'yeni.pdf'].entries()) {
+        await page.locator('#file-input').setInputFiles({ name, mimeType: 'application/pdf', buffer: Buffer.from(name) });
+        await page.waitForFunction(length => window.__pendingUploadBodies.length === length, index + 1);
+    }
+    assert.deepEqual(await page.evaluate(() => window.__pendingUploadBodies.map(call => call.signal.aborted)), [true, false]);
+    await page.evaluate(() => window.__pendingUploadBodies[1].resolve({ text: 'Yeni metin hazır' }));
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    await page.evaluate(async () => {
+        window.__pendingUploadBodies[0].resolve({ text: 'Eski metin geç geldi' });
+        await Promise.resolve();
+        await Promise.resolve();
+    });
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Yeni metin hazır');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+    assert.match(await page.locator('#uploadStatus').textContent(), /yeni\.pdf/);
+});
+
+test('90-second timeout aborts the real fetch signal and preserves the prior document and reading statistics', async t => {
+    let requests = 0;
+    let release;
+    let received;
+    const pending = new Promise(resolve => { received = resolve; });
+    const page = await setup(t, { response: async route => {
+        if (++requests === 1) return route.fulfill({ json: { text: 'Mavi kuş yavaş uçar' } });
+        await new Promise(resolve => { release = resolve; received(); });
+        try { await route.fulfill({ json: { text: 'Geç gelen metin' } }); } catch { /* native fetch was aborted */ }
+    } });
+    await upload(page);
+    await beginReading(page);
+    await speechEvent(page, 'result', 'mavi');
+    await page.locator('#baslatBtn').click();
+    await speechEvent(page, 'end');
+    await installPausedClock(page);
+    await traceUploadSignals(page);
+    await page.locator('#file-input').setInputFiles({ name: 'yavas.pdf', mimeType: 'application/pdf', buffer: Buffer.from('synthetic timeout fixture') });
+    await pending;
+    await page.clock.runFor(89_999);
+    assert.equal(await page.locator('#file-upload-area').getAttribute('aria-busy'), 'true');
+    await page.clock.runFor(1);
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    assert.deepEqual(await page.evaluate(() => window.__uploadCalls.map(call => call.aborted)), [true]);
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'error');
+    assert.match(await page.locator('#durum').textContent(), /zaman|sür|yanıt/i);
+    await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+    await expectLaidOut(page, 'progressContainer', 'progressText');
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Mavi kuş yavaş uçar');
+    assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '25');
+    assert.equal(await page.locator('#kelime-0').getAttribute('class'), 'word-button correct');
+    release();
+    await page.locator('#finishReadingBtn').click();
+    await expectReport(page, { total: 4, correct: 1, incorrect: 0, skipped: 0, unread: 3, accuracy: 25 });
+});
+
+test('a new PDF aborts the prior upload and late results cannot replace it or its ready status', async t => {
+    let release;
+    let received;
+    let requests = 0;
+    const pending = new Promise(resolve => { received = resolve; });
+    const page = await setup(t, { response: async route => {
+        if (++requests === 1) {
+            await new Promise(resolve => { release = resolve; received(); });
+            try { await route.fulfill({ json: { text: 'Eski PDF metni' } }); } catch { /* native fetch was aborted */ }
+        } else await route.fulfill({ json: { text: 'Yeni PDF metni' } });
+    } });
+    await installPausedClock(page);
+    await traceUploadSignals(page);
+    await page.locator('#file-input').setInputFiles({ name: 'eski.pdf', mimeType: 'application/pdf', buffer: Buffer.from('synthetic old PDF') });
+    await pending;
+    await upload(page, 'yeni.pdf');
+    assert.deepEqual(await page.evaluate(() => window.__uploadCalls.map(call => call.aborted)), [true, false]);
+    release();
+    await page.clock.runFor(10_000);
+    assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Yeni PDF metni');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+    assert.match(await page.locator('#uploadStatus').textContent(), /Metin okumaya hazır/);
+    assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+});
+
+test('repeated in-flight PDF selection with matching metadata issues one request and does not restart its timer', async t => {
+    let release;
+    let received;
+    let requests = 0;
+    const pending = new Promise(resolve => { received = resolve; });
+    const page = await setup(t, { response: async route => {
+        requests++;
+        await new Promise(resolve => { release = resolve; received(); });
+        await route.fulfill({ json: { text: 'Tek bir metin' } });
+    } });
+    await installPausedClock(page);
+    await traceUploadSignals(page);
+    const dispatchSameFile = () => page.evaluate(() => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File(['synthetic duplicate fixture'], 'ayni.pdf', { type: 'application/pdf', lastModified: 1234 }));
+        document.getElementById('file-upload-area').dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    });
+    await dispatchSameFile();
+    await pending;
+    await page.clock.runFor(4_000);
+    await dispatchSameFile();
+    await dispatchSameFile();
+    assert.equal(await page.evaluate(() => window.__uploadCalls.length), 1);
+    assert.equal(requests, 1);
+    assert.deepEqual(await page.evaluate(() => window.__uploadCalls.map(call => call.aborted)), [false]);
+    await page.clock.runFor(4_000);
+    assert.equal(await page.locator('#uploadWaitHint').isVisible(), true, 'duplicate events do not postpone the slow-server explanation');
+    release();
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
+});
+
+test('320px upload layout keeps the busy status, timer and server explanation inside the viewport width', async t => {
+    let release;
+    let received;
+    const pending = new Promise(resolve => { received = resolve; });
+    const page = await setup(t, { viewport: { width: 320, height: 360 }, response: async route => {
+        await new Promise(resolve => { release = resolve; received(); });
+        await route.fulfill({ json: { text: 'Mobil metin' } });
+    } });
+    await installPausedClock(page);
+    const originalScrollY = await page.evaluate(() => window.scrollY);
+    await page.locator('#file-input').setInputFiles({ name: 'cokuzun-yapay-dosya-adi'.repeat(5) + '.pdf', mimeType: 'application/pdf', buffer: Buffer.from('synthetic mobile fixture') });
+    await pending;
+    await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadWaitHint');
+    await expectLaidOut(page, 'uploadFeedback', 'uploadProgress');
+    let promptState = await viewState(page, ['uploadPrompt']);
+    assertInViewport(promptState.elements.uploadPrompt, promptState, 'mobile upload status in the file picker');
+    assert.match(await page.locator('#uploadPrompt').textContent(), /Dosya gönderiliyor.*Sunucudan yanıt bekleniyor/);
+    await page.clock.runFor(8_000);
+    promptState = await viewState(page, ['uploadPrompt']);
+    assertInViewport(promptState.elements.uploadPrompt, promptState, 'mobile delayed-server explanation in the file picker');
+    assert.match(await page.locator('#uploadPrompt').textContent(), /Sunucudan yanıt bekleniyor.*İlk açılış.*yeniden dosya seçmeniz gerekmez/);
+    assert.equal(promptState.scrollY, originalScrollY, 'upload feedback never forces mobile page scrolling');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    for (const id of ['uploadFeedback', 'uploadStatus', 'uploadElapsed', 'uploadWaitHint']) {
+        const bounds = await page.locator(`#${id}`).boundingBox();
+        assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 321, `${id} fits 320px`);
+    }
+    release();
+    await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+    await expectLaidOut(page, 'progressContainer', 'progressText');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(await page.locator('#baslatBtn').isDisabled(), false);
 });
 
 test('320px viewport fits document, correction controls and scrollable results without horizontal overflow', async t => {

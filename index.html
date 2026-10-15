@@ -21,7 +21,7 @@
         @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-10px); } 100% { transform: translateY(0px); } }
         #file-upload-area p { font-size: 1.1em; color: #7f8c8d; font-weight: 700; }
         #file-input { display: none; }
-        .progress-container { width: 100%; background-color: #ecf0f1; border-radius: 20px; margin-top: 25px; height: 25px; display: none; box-shadow: inset 0 3px 6px rgba(0,0,0,0.1); }
+        .progress-container { width: 100%; background-color: #ecf0f1; border-radius: 20px; margin-top: 25px; height: 25px; overflow: hidden; box-shadow: inset 0 3px 6px rgba(0,0,0,0.1); }
         .progress-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #a8ff78 0%, #78ffd6 100%); border-radius: 20px; transition: width 0.5s ease-in-out; box-shadow: 0 3px 10px rgba(120, 255, 214, 0.5); }
         .font-controls { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 25px; margin-bottom: -15px; }
         .font-controls button { background-color: #ff9f1c; color: white; width: 45px; height: 45px; padding: 0; font-size: 22px; font-weight: 900; line-height: 45px; margin-top: 0; border-radius: 50%; box-shadow: 0 5px 0 #cc7a00; transition: all 0.1s; }
@@ -75,7 +75,15 @@
         #file-upload-area[aria-disabled="true"] { cursor: wait; opacity: 0.75; }
         #file-upload-area p { color: #526269; }
         #file-upload-area .upload-hint { font-size: 0.95em; }
-        .progress-container { display: block; overflow: hidden; }
+        #uploadFeedback { margin-top: 16px; padding: 16px; border: 2px solid #bde0fe; border-radius: 20px; background: #f3fbff; color: #304f60; text-align: left; overflow-wrap: anywhere; }
+        #uploadFeedback[data-state="error"] { border-color: #e6a0a0; background: #fff1ed; color: #9b3030; }
+        #uploadFeedback[data-state="ready"] { border-color: #91cba9; background: #f0fff3; color: #245b37; }
+        #uploadStatus { margin: 8px 0; font-weight: 800; line-height: 1.5; }
+        #uploadFileInfo, #uploadElapsed, #uploadWaitHint { margin: 6px 0; font-size: 0.95em; line-height: 1.5; }
+        #uploadProgress { align-items: center; gap: 10px; font-size: 0.95em; }
+        #uploadProgress:not([hidden]) { display: flex; }
+        #uploadProgress .loader { flex: 0 0 24px; width: 24px; height: 24px; border-width: 4px; }
+        .progress-container:not([hidden]) { display: block; }
         #progressText { color: #526269; margin: 10px 0 0; font-weight: 700; }
         .font-controls { flex-wrap: wrap; margin-bottom: 0; }
         .font-controls button { border: none; cursor: pointer; }
@@ -138,14 +146,22 @@
 <body>
     <main class="container">
         <h1>Okuma Arkadaşım </h1>
-        <h2>Okunacak Word Dosyasını Seçerek Maceraya Başla!</h2>
+        <h2>Word veya PDF dosyanı seçerek okumaya başla!</h2>
         
-        <div id="file-upload-area" role="button" tabindex="0" aria-label="Okunacak DOCX dosyasını seç" aria-describedby="uploadHint" aria-disabled="false">
+        <div id="file-upload-area" role="button" tabindex="0" aria-label="Okunacak Word veya PDF dosyasını seç" aria-describedby="uploadHint pdfHint" aria-disabled="false">
             <div class="upload-icon" aria-hidden="true"><i class="fas fa-magic"></i></div>
-            <p>Dosyayı buraya sürükleyin veya seçmek için tıklayın</p>
-            <p class="upload-hint" id="uploadHint">Yalnızca DOCX dosyaları; en fazla 10 MB.</p>
+            <p id="uploadPrompt">Dosyayı buraya sürükleyin veya seçmek için tıklayın</p>
+            <p class="upload-hint" id="uploadHint">Word (.docx) veya PDF (.pdf); en fazla 10 MB.</p>
+            <p class="upload-hint" id="pdfHint">PDF dosyasında seçilebilir metin olmalı. Taranmış veya fotoğraf şeklindeki PDF'ler henüz desteklenmiyor.</p>
         </div>
-        <input type="file" id="file-input" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Okunacak DOCX dosyası" hidden>
+        <input type="file" id="file-input" accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" aria-label="Okunacak Word veya PDF dosyası" hidden>
+        <section id="uploadFeedback" aria-label="Belge yükleme durumu" hidden>
+            <p id="uploadFileInfo"></p>
+            <p id="uploadStatus" role="status" aria-live="polite" aria-atomic="true"></p>
+            <div id="uploadProgress" role="progressbar" aria-label="Belge yükleniyor" hidden><span class="loader" aria-hidden="true"></span><span>İşlem sürüyor…</span></div>
+            <p id="uploadElapsed" aria-live="off"></p>
+            <p id="uploadWaitHint" role="status" aria-live="polite" hidden></p>
+        </section>
         
         <div class="progress-container" id="progressContainer" role="progressbar" aria-label="Okuma ilerlemesi" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
             <div class="progress-bar" id="progressBar"></div>
