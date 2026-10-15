@@ -2,12 +2,14 @@ import { ReadingEngine, normalizeWord, tokenizeText } from './reading-engine.js'
 
 export const UPLOAD_URL = 'https://okumadunyasi-api.onrender.com/upload';
 export const MAX_FILE_SIZE = 10 * 1024 * 1024;
-const UPLOAD_TIMEOUT = 90_000; // Allow for a Render cold start, but never wait forever.
+export const UPLOAD_TIMEOUT = 90_000; // Allow for a Render cold start, but never wait forever.
+export const UPLOAD_WAIT_HINT_DELAY = 8_000;
+export const EMPTY_PDF_MESSAGE = "Bu PDF'de okunabilir metin bulunamadı. Taranmış PDF'ler henüz desteklenmiyor.";
 
 export function validateFile(file) {
-    if (!file || !/\.docx$/i.test(file.name)) return 'Lütfen .docx uzantılı bir Word dosyası seçin.';
-    if (file.size === 0) return 'Bu dosya boş görünüyor. Başka bir Word dosyası seçin.';
-    if (file.size > MAX_FILE_SIZE) return 'Dosya çok büyük. En fazla 10 MB boyutunda bir Word dosyası seçin.';
+    if (!file || !/\.(docx|pdf)$/i.test(file.name)) return 'Lütfen .docx veya .pdf uzantılı bir dosya seçin.';
+    if (file.size === 0) return 'Bu dosya boş görünüyor. İçerik bulunan bir Word veya PDF dosyası seçin.';
+    if (file.size > MAX_FILE_SIZE) return 'Dosya çok büyük. En fazla 10 MiB boyutunda bir Word veya PDF dosyası seçin.';
     return null;
 }
 
@@ -30,6 +32,11 @@ export function initApp(doc = document, win = window) {
     const status = get('durum');
     const fileInput = get('file-input');
     const uploadArea = get('file-upload-area');
+    const uploadPrompt = get('uploadPrompt');
+    const uploadFeedback = get('uploadFeedback');
+    const uploadStatus = get('uploadStatus');
+    const uploadProgress = get('uploadProgress');
+    const uploadWaitHint = get('uploadWaitHint');
     const correctionBox = get('correction-box');
     const retryButton = get('retry-word-btn');
     const skipButton = get('skip-word-btn');
@@ -46,6 +53,8 @@ export function initApp(doc = document, win = window) {
     let uploading = false;
     let uploadNumber = 0;
     let uploadController;
+    let activeFileKey;
+    let clearUploadTimers = () => {};
     let currentFontSize = 26;
     let displayedWords = [];
     let previousPhase;
@@ -61,7 +70,10 @@ export function initApp(doc = document, win = window) {
             ? 'Bu tarayıcı sesli okumayı desteklemiyor. Chrome gibi konuşma tanımayı destekleyen bir tarayıcı deneyin. Dosyanızdaki metni yine görüntüleyebilirsiniz.'
             : 'Okumaya başlarken tarayıcının mikrofon iznine izin verin. Konuşma tanıma, tarayıcıya bağlı olarak internet bağlantısı gerektirebilir.';
 
-    function announce(message) { status.textContent = message; }
+    function announce(message) {
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = message;
+    }
 
     function focusWithoutScroll(element) { element?.focus({ preventScroll: true }); }
 
@@ -251,7 +263,7 @@ export function initApp(doc = document, win = window) {
         if (correction) get('correctionMessage').textContent = `“${snapshot.words[snapshot.index]}” kelimesini tekrar okuyun veya atlayın.`;
         if (!uploading) {
             const messages = {
-                ready: hasWords ? 'Metin hazır. Okumaya başlayabilirsiniz.' : 'Bir Word dosyası seçerek başlayın.',
+                ready: hasWords ? 'Metin hazır. Okumaya başlayabilirsiniz.' : 'Bir Word veya PDF dosyası seçerek başlayın.',
                 starting: 'Mikrofon açılıyor. İstenirse mikrofon izni verin.',
                 listening: 'Mikrofon dinliyor. Sıradaki kelimeleri okuyun.',
                 stopping: 'Mikrofon kapanıyor…',
@@ -337,60 +349,143 @@ export function initApp(doc = document, win = window) {
     get('fontDecreaseBtn').addEventListener('click', () => applyFontSize(Math.max(14, currentFontSize - 2)));
     get('fontResetBtn').addEventListener('click', () => applyFontSize(26));
 
+    function setUploadState(phase, message) {
+        const busy = !['ready', 'error'].includes(phase);
+        uploadFeedback.hidden = false;
+        uploadFeedback.dataset.state = busy ? 'busy' : phase;
+        uploadFeedback.dataset.phase = phase;
+        uploadStatus.textContent = message;
+        // On a small screen the detailed card can be below the fold. Keep the
+        // current state visible in the file picker itself without forcing scroll.
+        uploadPrompt.textContent = phase === 'ready'
+            ? 'Metin okumaya hazır! Yeni bir Word veya PDF dosyası da seçebilirsiniz.' : message;
+        uploadProgress.hidden = !busy;
+        uploadProgress.setAttribute('aria-valuetext', message);
+        // Keep the reading status in sync without announcing the same upload
+        // message twice; uploadStatus owns live announcements for this flow.
+        status.setAttribute('aria-live', 'off');
+        status.textContent = message;
+    }
+
+    function uploadErrorMessage(statusCode, data, file) {
+        const safeError = [400, 413, 422, 500].includes(statusCode) && typeof data?.error === 'string'
+            ? data.error.trim().slice(0, 600) : '';
+        if (safeError) {
+            if (/\.pdf$/i.test(file.name) && /metin bulunamadı|taranmış|\bOCR\b/iu.test(safeError)) return EMPTY_PDF_MESSAGE;
+            return safeError; // Rendered with textContent; never interpret server text as HTML.
+        }
+        if (statusCode === 413) return 'Sunucu bu belgeyi çok büyük buldu. Daha küçük bir Word veya PDF dosyası seçin.';
+        if (statusCode === 500) return 'Belge hazırlanırken sunucuda bir sorun oluştu. Biraz sonra yeniden deneyin.';
+        return 'Dosya işlenemedi. Geçerli bir Word veya PDF dosyasıyla yeniden deneyin.';
+    }
+
     async function uploadFile(file) {
         const validationMessage = validateFile(file);
-        if (validationMessage) { announce(validationMessage); return; }
+        if (validationMessage) {
+            // An invalid replacement must not cancel a valid upload in flight.
+            if (uploading) announce(validationMessage);
+            else {
+                get('uploadFileInfo').textContent = file?.name || '';
+                get('uploadElapsed').textContent = '';
+                setUploadState('error', validationMessage);
+                uploadWaitHint.hidden = true;
+            }
+            return;
+        }
+        const fileKey = JSON.stringify([file.name, file.size, file.type, file.lastModified]);
+        if (uploading && fileKey === activeFileKey) {
+            announce('Bu dosya zaten yükleniyor. Sunucudan yanıt bekleniyor.');
+            return;
+        }
         const requestNumber = ++uploadNumber;
         uploadController?.abort();
+        clearUploadTimers();
         const controller = new AbortController();
         uploadController = controller;
+        activeFileKey = fileKey;
         uploading = true;
         closeResults(false);
         win.speechSynthesis?.cancel();
         engine.pause();
         render(engine.snapshot());
         uploadArea.setAttribute('aria-busy', 'true');
-        announce('Word dosyanız yükleniyor. Sunucunun açılması biraz zaman alabilir…');
+        uploadWaitHint.hidden = true;
+        get('uploadFileInfo').textContent = `${file.name} · ${/\.pdf$/i.test(file.name) ? 'PDF' : 'Word'} · ${(file.size / (1024 * 1024)).toLocaleString('tr-TR', { maximumFractionDigits: 2 })} MiB`;
+        setUploadState('preparing', 'Dosya hazırlanıyor…');
+        const startedAt = win.performance.now();
+        const updateElapsed = (finished = false) => {
+            if (requestNumber !== uploadNumber) return;
+            const seconds = Math.max(0, (win.performance.now() - startedAt) / 1000);
+            get('uploadElapsed').textContent = finished
+                ? `İşlem süresi: ${seconds.toLocaleString('tr-TR', { maximumFractionDigits: 1 })} sn.`
+                : `Geçen süre: ${Math.floor(seconds)} sn.`;
+        };
+        updateElapsed();
         let timedOut = false;
+        let responseReceived = false;
         const timeout = win.setTimeout(() => { timedOut = true; controller.abort(); }, UPLOAD_TIMEOUT);
+        const waitHint = win.setTimeout(() => {
+            if (requestNumber !== uploadNumber || responseReceived) return;
+            uploadWaitHint.hidden = false;
+            uploadWaitHint.textContent = 'Sunucudan yanıt bekleniyor. Sunucu ilk istekte uyanırken bu işlem daha uzun sürebilir. Sayfayı açık tutabilirsiniz; yeniden dosya seçmeniz gerekmez.';
+            uploadPrompt.textContent = 'Sunucudan yanıt bekleniyor. İlk açılış biraz zaman alabilir; yeniden dosya seçmeniz gerekmez.';
+        }, UPLOAD_WAIT_HINT_DELAY);
+        const elapsedTimer = win.setInterval(updateElapsed, 1000);
+        const cleanupTimers = () => {
+            win.clearTimeout(timeout);
+            win.clearTimeout(waitHint);
+            win.clearInterval(elapsedTimer);
+        };
+        clearUploadTimers = cleanupTimers;
         try {
             const formData = new FormData();
             formData.append('file', file);
+            setUploadState('sending', 'Dosya gönderiliyor. Sunucudan yanıt bekleniyor…');
             const response = await win.fetch(UPLOAD_URL, { method: 'POST', body: formData, signal: controller.signal });
             if (requestNumber !== uploadNumber) return;
-            if (!response.ok) {
-                throw new Error(response.status === 413
-                    ? 'Sunucu bu dosyayı çok büyük buldu. Daha küçük bir dosya seçin.'
-                    : 'Dosya işlenemedi. Geçerli bir Word dosyasıyla yeniden deneyin.');
-            }
+            if (controller.signal.aborted) throw new Error('timeout');
+            responseReceived = true;
+            uploadWaitHint.hidden = true;
+            setUploadState('processing', 'Metin hazırlanıyor. Sunucunun yanıtı okunuyor…');
             let data;
             try { data = await response.json(); }
-            catch { throw new Error('Sunucudan geçerli bir yanıt alınamadı. Biraz sonra yeniden deneyin.'); }
+            catch {
+                if (timedOut) throw new Error('timeout');
+                if (!response.ok) throw new Error(uploadErrorMessage(response.status, null, file));
+                throw new Error('Sunucudan geçerli bir yanıt alınamadı. Biraz sonra yeniden deneyin.');
+            }
             if (requestNumber !== uploadNumber) return;
-            if (typeof data?.text !== 'string') throw new Error('Sunucu okunabilir metin göndermedi. Başka bir Word dosyası deneyin.');
+            if (controller.signal.aborted) throw new Error('timeout');
+            if (!response.ok) throw new Error(uploadErrorMessage(response.status, data, file));
+            if (typeof data?.text !== 'string') throw new Error('Sunucu okunabilir metin göndermedi. Başka bir Word veya PDF dosyası deneyin.');
             const words = tokenizeText(data.text);
             if (words.length === 0 || words.every(word => !normalizeWord(word))) {
-                throw new Error('Bu dosyada okunabilecek kelime bulunamadı. Metin içeren bir Word dosyası seçin.');
+                throw new Error(/\.pdf$/i.test(file.name) ? EMPTY_PDF_MESSAGE
+                    : 'Bu dosyada okunabilecek kelime bulunamadı. Metin içeren bir Word dosyası seçin.');
             }
             uploading = false;
             applyFontSize(26);
             engine.load(words);
-            announce(`${file.name} yüklendi. ${words.length} kelime okumaya hazır.${supported ? '' : ' Sesli okuma bu tarayıcıda kullanılamıyor.'}`);
+            setUploadState('ready', `${file.name} yüklendi. Metin okumaya hazır: ${words.length} kelime.${supported ? '' : ' Sesli okuma bu tarayıcıda kullanılamıyor.'}`);
         } catch (error) {
             if (requestNumber !== uploadNumber) return;
             uploading = false;
             render(engine.snapshot());
-            announce(timedOut
+            setUploadState('error', timedOut
                 ? 'Sunucu zamanında yanıt vermedi. Biraz sonra yeniden deneyin.'
                 : error instanceof TypeError
                     ? 'Sunucuya ulaşılamadı. İnternet bağlantısını kontrol edip yeniden deneyin.'
                     : error.message || 'Dosya yüklenemedi. Yeniden deneyin.');
         } finally {
-            win.clearTimeout(timeout);
+            cleanupTimers();
             if (requestNumber === uploadNumber) {
                 uploading = false;
+                updateElapsed(true);
+                uploadWaitHint.hidden = true;
                 uploadArea.setAttribute('aria-busy', 'false');
                 uploadController = null;
+                activeFileKey = null;
+                clearUploadTimers = () => {};
                 fileInput.value = ''; // Selecting the same file again must trigger change.
             }
         }
@@ -416,7 +511,7 @@ export function initApp(doc = document, win = window) {
         event.preventDefault();
         uploadArea.classList.remove('drag-active');
         const files = event.dataTransfer?.files;
-        if (files?.length !== 1) { announce('Lütfen her seferinde tek bir Word dosyası bırakın.'); return; }
+        if (files?.length !== 1) { announce('Lütfen her seferinde tek bir Word veya PDF dosyası bırakın.'); return; }
         uploadFile(files[0]);
     });
     return { engine, uploadFile };

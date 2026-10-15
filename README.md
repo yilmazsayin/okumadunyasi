@@ -1,6 +1,6 @@
 # Okuma Dünyası
 
-[Okuma Dünyası](https://okumadunyasi.vercel.app/), ilkokul öğrencilerinin DOCX
+[Okuma Dünyası](https://okumadunyasi.vercel.app/), ilkokul öğrencilerinin DOCX ve PDF
 belgelerindeki metinlerle Türkçe okuma pratiği yapmasını sağlayan statik bir uygulamadır.
 
 ## Yerel geliştirme
@@ -8,7 +8,7 @@ belgelerindeki metinlerle Türkçe okuma pratiği yapmasını sağlayan statik b
 Derleme ve frontend sunucu bağımlılığı yoktur. Depo kökünde:
 
 ```sh
-python3 -m http.server 8000 --bind 127.0.0.1
+python3 -m http.server 3000 --bind 127.0.0.1
 ```
 
 `index.html`, `app.js` ve `reading-engine.js` aynı dizinden sunulmalıdır. JavaScript
@@ -17,11 +17,35 @@ kullanın. Mevcut Vercel statik dosya yapısı korunur; framework veya build ad�
 Dağıtım ayarları değiştirilmemiştir; canlı Vercel dağıtımı bu değişiklik kapsamında
 test edilmemiştir.
 
-DOCX yüklemesi mevcut `https://okumadunyasi-api.onrender.com/upload` adresine,
+PDF ve DOCX yüklemesi mevcut `https://okumadunyasi-api.onrender.com/upload` adresine,
 `file` alanıyla `multipart/form-data` POST gönderir. Backend bu depoda bulunmaz.
-Frontend `.docx` uzantısını, boş dosyayı ve 10 MiB sınırını kontrol eder; bu kontroller
+Frontend `.docx` / `.pdf` uzantısını, boş dosyayı ve 10 MiB sınırını kontrol eder; bu kontroller
 sunucudaki dosya doğrulamasının yerini tutmaz. İstek 90 saniyede zaman aşımına uğrar;
-yeni dosya seçilirse önceki istek iptal edilir. Başarısız yükleme mevcut metni korur.
+yeni dosya seçilirse önceki istek iptal edilir. Aynı ad/boyut/tür/değiştirilme zamanı
+ile halen yüklenmekte olan dosya için ikinci istek oluşturulmaz. Başarısız yükleme
+mevcut metni, değerlendirmeleri ve yazı boyutunu korur; mikrofon güvenle duraklatılır.
+Her iki formatın `{ "text": "..." }` yanıtı aynı okuma motoruna aktarılır.
+
+## Yükleme deneyimi ve PDF sınırları
+
+- `Dosya hazırlanıyor`: dosya doğrulanıp multipart istek hazırlanır.
+- `Dosya gönderiliyor / Sunucudan yanıt bekleniyor`: `fetch` isteği devam eder.
+  Gönderim ile sunucudaki çıkarma işlemi ayrı ayrı ölçülemediğinden birlikte belirtilir.
+- `Metin hazırlanıyor`: gelen JSON yanıtı okunup kelimelere ayrılır.
+- `Metin okumaya hazır`: metin okuma alanına aktarılmıştır.
+
+İşlem boyunca gerçek istemci süresi gösterilir. Yanıt 8 saniyeyi aşarsa sunucunun
+ilk istekte uyanmasının zaman alabileceği açıklanır. Yüzde bilinmediğinden yalnızca
+belirsiz işlem göstergesi kullanılır; gönderim veya backend işleme yüzdesi uydurulmaz.
+Render'ın soğuk başlangıcı frontend koduyla tamamen giderilemez. İptal, sonuç ve hata
+sonrasında ilgili zamanlayıcılar temizlenir; eski istek yeni dosyanın durumunu değiştiremez.
+Durum metni dosya seçme alanında da görünür; ayrıntılı durum kartı küçük ekranda
+aşağıda kalsa bile beklemenin sürdüğü anlaşılır. Yeni bir dosya için alan kullanılabilir kalır.
+
+PDF'de seçilebilir metin bulunmalıdır. OCR yoktur; taranmış/fotoğraf PDF'lerde
+`Bu PDF'de okunabilir metin bulunamadı. Taranmış PDF'ler henüz desteklenmiyor.`
+mesajı gösterilir. Şifreli/bozuk belge ve boyut/sayfa sınırı gibi güvenli backend
+`400/413/422/500` JSON `error` mesajları HTML olarak yorumlanmadan gösterilir.
 
 ## Okuma akışı ve rapor
 
@@ -85,6 +109,9 @@ testleri gerçek HTML/ES modülleri, güvenli metin gösterimi, API yanıt hatal
 kontrolleri, eşzamanlı yükleme, sürükle-bırak, klavye odağı ve 320px taşma kontrolünü
 çalıştırır. API yanıtları ve SpeechRecognition olayları sahtedir; canlı API'ye dosya
 ve gerçek ses gönderilmez. Test verileri yapaydır ve kişisel bilgi içermez.
+PDF/DOCX seçimi ve sürükle-bırak, güvenli hata yanıtları, yavaş backend, geçen süre,
+90 saniyelik zaman aşımı, önceki isteğin iptali ve tekrar istek önleme ayrıca sınanır.
+Bekleme testleri gerçek 90 saniye beklemek yerine tarayıcı saatini kontrol eder.
 Uzun metin testleri ayrıca `window.scrollY`, odak ve kelime/kontrol konumlarını,
 modal iç kaydırmayı, arka sayfa kilidini ve kapatıp yeniden başlama davranışlarını
 masaüstünde ve 320px genişlikte kısa mobil viewportlarda doğrular.
@@ -99,7 +126,8 @@ Chrome ve mobil tarayıcılarda şu kontroller yapılmalıdır:
 3. Hatalı kelimede hızlı Tekrar/Atla, son kelimeyi bitirme ve yarıda durdurma.
    Ayrıca dinlerken/duraklamada/düzeltmede erken bitirme ve rapordan yeniden başlama.
 4. Kelime seslendirmesinde Türkçe sesin bulunması, cihaz ses ayarı ve mobil izinler.
-5. Kişisel veri içermeyen gerçek bir DOCX'in canlı API'den metne dönüşmesi ve CORS.
+5. Kişisel veri içermeyen gerçek DOCX ve seçilebilir metinli PDF'nin canlı API'den
+   metne dönüşmesi; taranmış/şifreli PDF yanıtları ve ilgili origin için CORS.
 
 SpeechRecognition desteği ve hizmetin erişilebilirliği tarayıcıya göre değişebilir.
 Destek bulunmadığında metin görüntülenebilir; sesli okuma düğmesi açıklamayla kapatılır.
@@ -118,18 +146,16 @@ Destek bulunmadığında metin görüntülenebilir; sesli okuma düğmesi açık
 - Metin ve dosya adı `innerHTML` içine yerleştiriliyordu; boyut/uzantı/yanıt denetimi,
   gerçek sürükle-bırak, destek açıklaması ve klavye odağı yönetimi eksikti.
 
-## Backend için ayrı iyileştirmeler
+## Backend uyumluluğu ve CORS
 
-[`okumadunyasiBE/main/app.py`](https://github.com/yilmazsayin/okumadunyasiBE/blob/main/app.py)
-yalnızca okunarak incelendi; backend ve Render ayarları değiştirilmedi. Kaynakta
-görülen eksikler için ayrı bir backend görevi önerilir:
+Backend'in [`88c0fd4` sürümü](https://github.com/yilmazsayin/okumadunyasiBE/blob/88c0fd4598f3c1e51befa4529fb71eb23b31ff13/app.py)
+yalnızca okunarak incelendi. PDF/DOCX imza ve boyut doğrulaması, kaynak sınırları,
+güvenli JSON hata yanıtları ve origin sınırlaması backend'de bulunur. Bu frontend
+görevinde backend dosyaları, Render veya Vercel ayarları değiştirilmemiştir.
 
-- `MAX_CONTENT_LENGTH` ve DOCX ZIP açılımı / dosya sayısı sınırları; uzantıya ek
-  olarak gerçek DOCX içerik doğrulaması.
-- Büyük/küçük harfe duyarsız uzantı denetimi ve boş metni reddetme.
-- Bozuk dosyalar için `400`, fazla büyük dosyalar için `413`; ham exception metni
-  yerine kullanıcıya uygun, güvenli hata yanıtları.
-- `CORS(app)` yerine onaylanan frontend origin'lerinin açıkça sınırlandırılması.
-
-Kaynakta `__main__` altındaki `debug=True`, canlı Render sürecinin debug modunda
-çalıştığını kanıtlamaz; canlı ayar konusunda doğrulanmış bir bulgu yoktur.
+Canlı origin `https://okumadunyasi.vercel.app` izinlidir. Backend kaynak kodu ayrıca
+`localhost` / `127.0.0.1` için `3000` ve `5173` portlarını kabul eder. Vercel preview
+adresleri farklı origin'dir ve otomatik izinli değildir. Preview isteği CORS nedeniyle
+engellenirse bu frontend hatası olarak değerlendirilmemeli; gereken **tam preview
+origin'i** ayrıca yetkilendirilmelidir. Güvenlik kontrolleri veya CORS gevşetilmez.
+Bu görevde canlı preview origin'i ve Render çalışma zamanı CORS ayarları doğrulanmadı.
