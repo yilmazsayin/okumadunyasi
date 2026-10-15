@@ -20,7 +20,8 @@ test edilmemiştir.
 PDF ve DOCX yüklemesi mevcut `https://okumadunyasi-api.onrender.com/upload` adresine,
 `file` alanıyla `multipart/form-data` POST gönderir. Backend bu depoda bulunmaz.
 Frontend `.docx` / `.pdf` uzantısını, boş dosyayı ve 10 MiB sınırını kontrol eder; bu kontroller
-sunucudaki dosya doğrulamasının yerini tutmaz. İstek 90 saniyede zaman aşımına uğrar;
+sunucudaki dosya doğrulamasının yerini tutmaz. Arayüzde sınır **10 MB** olarak gösterilir;
+teknik sınır **10 × 1024 × 1024 bayt** olarak korunur. İstek 90 saniyede zaman aşımına uğrar;
 yeni dosya seçilirse önceki istek iptal edilir. Aynı ad/boyut/tür/değiştirilme zamanı
 ile halen yüklenmekte olan dosya için ikinci istek oluşturulmaz. Başarısız yükleme
 mevcut metni, değerlendirmeleri ve yazı boyutunu korur; mikrofon güvenle duraklatılır.

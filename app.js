@@ -9,7 +9,7 @@ export const EMPTY_PDF_MESSAGE = "Bu PDF'de okunabilir metin bulunamadı. Taranm
 export function validateFile(file) {
     if (!file || !/\.(docx|pdf)$/i.test(file.name)) return 'Lütfen .docx veya .pdf uzantılı bir dosya seçin.';
     if (file.size === 0) return 'Bu dosya boş görünüyor. İçerik bulunan bir Word veya PDF dosyası seçin.';
-    if (file.size > MAX_FILE_SIZE) return 'Dosya çok büyük. En fazla 10 MiB boyutunda bir Word veya PDF dosyası seçin.';
+    if (file.size > MAX_FILE_SIZE) return 'Dosya çok büyük. En fazla 10 MB boyutunda bir Word veya PDF dosyası seçin.';
     return null;
 }
 
@@ -372,7 +372,8 @@ export function initApp(doc = document, win = window) {
             ? data.error.trim().slice(0, 600) : '';
         if (safeError) {
             if (/\.pdf$/i.test(file.name) && /metin bulunamadı|taranmış|\bOCR\b/iu.test(safeError)) return EMPTY_PDF_MESSAGE;
-            return safeError; // Rendered with textContent; never interpret server text as HTML.
+            // Use the familiar display label; the byte limit is unchanged.
+            return safeError.replace(/\bMiB\b/g, 'MB'); // Always rendered with textContent.
         }
         if (statusCode === 413) return 'Sunucu bu belgeyi çok büyük buldu. Daha küçük bir Word veya PDF dosyası seçin.';
         if (statusCode === 500) return 'Belge hazırlanırken sunucuda bir sorun oluştu. Biraz sonra yeniden deneyin.';
@@ -410,7 +411,7 @@ export function initApp(doc = document, win = window) {
         render(engine.snapshot());
         uploadArea.setAttribute('aria-busy', 'true');
         uploadWaitHint.hidden = true;
-        get('uploadFileInfo').textContent = `${file.name} · ${/\.pdf$/i.test(file.name) ? 'PDF' : 'Word'} · ${(file.size / (1024 * 1024)).toLocaleString('tr-TR', { maximumFractionDigits: 2 })} MiB`;
+        get('uploadFileInfo').textContent = `${file.name} · ${/\.pdf$/i.test(file.name) ? 'PDF' : 'Word'} · ${(file.size / (1024 * 1024)).toLocaleString('tr-TR', { maximumFractionDigits: 2 })} MB`;
         setUploadState('preparing', 'Dosya hazırlanıyor…');
         const startedAt = win.performance.now();
         const updateElapsed = (finished = false) => {

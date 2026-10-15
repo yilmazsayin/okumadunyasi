@@ -11,7 +11,7 @@ for (const extension of ['docx', 'DOCX', 'pdf', 'PDF']) {
             }
         }
         assert.match(validateFile({ name: `bos.${extension}`, size: 0 }), /boş/);
-        assert.match(validateFile({ name: `buyuk.${extension}`, size: MAX_FILE_SIZE + 1 }), /10 MiB/);
+        assert.match(validateFile({ name: `buyuk.${extension}`, size: MAX_FILE_SIZE + 1 }), /10 MB/);
     });
 }
 

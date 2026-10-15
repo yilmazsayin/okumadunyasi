@@ -66,6 +66,32 @@ async function upload(page, name = 'yapay-metin.docx') {
     await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
 }
 
+// Check actual layout as well as the attribute: author CSS must not turn hidden
+// progress indicators into visible bars or leave blank space in the document.
+async function expectNoLayout(page, ...ids) {
+    for (const id of ids) {
+        const locator = page.locator(`#${id}`);
+        assert.equal(await locator.isVisible(), false, `${id} is not visible`);
+        assert.deepEqual(await locator.evaluate(element => ({
+            hidden: element.hidden,
+            display: getComputedStyle(element).display,
+            rects: element.getClientRects().length,
+            height: element.getBoundingClientRect().height
+        })), { hidden: true, display: 'none', rects: 0, height: 0 }, `${id} does not occupy layout space`);
+    }
+}
+
+async function expectLaidOut(page, ...ids) {
+    for (const id of ids) {
+        const locator = page.locator(`#${id}`);
+        assert.equal(await locator.isVisible(), true, `${id} is visible`);
+        assert.equal(await locator.evaluate(element => !element.hidden
+            && getComputedStyle(element).display !== 'none'
+            && element.getClientRects().length > 0
+            && element.getBoundingClientRect().height > 0), true, `${id} occupies layout space`);
+    }
+}
+
 async function event(page, type, value) {
     await page.evaluate(({ type, value }) => {
         const recognition = window.__recognitions.at(-1);
@@ -292,7 +318,7 @@ test('invalid extension, empty file, and oversize file never issue upload reques
     for (const [name, buffer, expected] of [
         ['metin.txt', Buffer.from('test'), /\.docx|\.pdf/],
         ['bos.docx', Buffer.alloc(0), /boş/],
-        ['buyuk.docx', Buffer.alloc(10 * 1024 * 1024 + 1), /10 MiB/]
+        ['buyuk.docx', Buffer.alloc(10 * 1024 * 1024 + 1), /10 MB/]
     ]) {
         await page.locator('#file-input').setInputFiles({ name, mimeType: 'application/octet-stream', buffer });
         assert.match(await page.locator('#durum').textContent(), expected);
@@ -377,6 +403,25 @@ async function traceUploadSignals(page) {
     });
 }
 
+for (const viewport of [{ width: 1000, height: 900 }, { width: 320, height: 360 }]) {
+    test(`initial HTML keeps reading and upload indicators out of layout before JavaScript (${viewport.width}px)`, async t => {
+        const context = await browser.newContext({ viewport, javaScriptEnabled: false });
+        t.after(() => context.close());
+        const page = await context.newPage();
+        await page.route('https://**/*', route => route.abort());
+        await page.goto(baseURL);
+        await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadFeedback', 'uploadProgress', 'uploadWaitHint');
+        assert.match(await page.locator('#uploadHint').textContent(), /10 MB/);
+        assert.doesNotMatch(await page.locator('#uploadHint').textContent(), /MiB/);
+    });
+
+    test(`initial JavaScript leaves both progress indicators hidden (${viewport.width}px)`, async t => {
+        const page = await setup(t, { viewport });
+        await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadFeedback', 'uploadProgress', 'uploadWaitHint');
+        assert.match(await page.locator('#uploadHint').textContent(), /10 MB/);
+    });
+}
+
 for (const extension of ['PDF', 'DOCX']) {
     test(`${extension} selection keeps the existing multipart API and reading engine`, async t => {
         const requests = [];
@@ -398,7 +443,10 @@ for (const extension of ['PDF', 'DOCX']) {
         assert.ok(requests[0].body.includes(`name="file"; filename="yapay-metin.${extension}"`));
         assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
         assert.match(await page.locator('#uploadStatus').textContent(), /Metin okumaya hazır/);
-        assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+        await expectLaidOut(page, 'progressContainer', 'progressText', 'uploadFeedback');
+        await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+        assert.match(await page.locator('#uploadFileInfo').textContent(), / MB$/);
+        assert.doesNotMatch(await page.locator('#uploadFileInfo').textContent(), /MiB/);
         await beginReading(page);
         await speechEvent(page, 'result', 'MERHABA DÜNYA');
         await speechEvent(page, 'end');
@@ -435,7 +483,7 @@ test('PDF drag and drop uses the existing upload flow and keyboard chooser accep
 
 for (const [status, error, expected = error] of [
     [400, 'Bu PDF parola ile korunuyor. Parolasız bir PDF seçin.'],
-    [413, 'Dosya çok büyük. En fazla 10 MB boyutunda bir dosya seçin.'],
+    [413, 'Dosya çok büyük. En fazla 10 MiB boyutunda bir dosya seçin.', 'Dosya çok büyük. En fazla 10 MB boyutunda bir dosya seçin.'],
     [422, 'PDF dosyasında seçilebilir metin bulunamadı. Taranmış belgeler için OCR desteği henüz yok.', scannedPdfMessage],
     [500, 'Dosya şu anda işlenemedi. Lütfen yeniden deneyin.'],
     [400, 'PDF dosyası bozuk veya geçersiz. Başka bir dosya seçin.']
@@ -450,7 +498,9 @@ for (const [status, error, expected = error] of [
         assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'error');
         assert.equal(await page.locator('#file-upload-area').getAttribute('aria-busy'), 'false');
         assert.equal(await page.locator('#baslatBtn').isDisabled(), true);
-        assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+        await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadProgress', 'uploadWaitHint');
+        await expectLaidOut(page, 'uploadFeedback');
+        assert.doesNotMatch(await page.locator('#uploadStatus').textContent(), /MiB/);
         await upload(page, 'ikinci-yapay.pdf');
         assert.equal(await page.locator('#baslatBtn').isDisabled(), false);
         assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
@@ -508,7 +558,8 @@ test('pending upload shows real elapsed time and delayed Render help without inv
     assert.equal(await page.locator('#uploadStatus').getAttribute('role'), 'status');
     assert.match(await page.locator('#uploadStatus').textContent(), /^Dosya gönderiliyor\. Sunucudan yanıt bekleniyor/);
     const progress = page.locator('#uploadProgress');
-    assert.equal(await progress.isVisible(), true);
+    await expectLaidOut(page, 'uploadFeedback', 'uploadProgress');
+    await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadWaitHint');
     assert.equal(await progress.getAttribute('role'), 'progressbar');
     assert.equal(await progress.getAttribute('aria-valuenow'), null);
     assert.doesNotMatch(await page.locator('#uploadFeedback').textContent(), /%\s*\d|\d\s*%/);
@@ -525,8 +576,8 @@ test('pending upload shows real elapsed time and delayed Render help without inv
     release();
     await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
     assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'ready');
-    assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
-    assert.equal(await progress.isVisible(), false);
+    await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+    await expectLaidOut(page, 'progressContainer', 'progressText');
     const stoppedElapsed = await page.locator('#uploadElapsed').textContent();
     await page.clock.runFor(12_000);
     assert.equal(await page.locator('#uploadWaitHint').isVisible(), false, 'a completed upload cannot show a late waiting hint');
@@ -647,7 +698,8 @@ test('90-second timeout aborts the real fetch signal and preserves the prior doc
     assert.deepEqual(await page.evaluate(() => window.__uploadCalls.map(call => call.aborted)), [true]);
     assert.equal(await page.locator('#uploadFeedback').getAttribute('data-state'), 'error');
     assert.match(await page.locator('#durum').textContent(), /zaman|sür|yanıt/i);
-    assert.equal(await page.locator('#uploadWaitHint').isVisible(), false);
+    await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+    await expectLaidOut(page, 'progressContainer', 'progressText');
     assert.equal((await page.locator('#okuma-alani').textContent()).trim(), 'Mavi kuş yavaş uçar');
     assert.equal(await page.locator('#progressContainer').getAttribute('aria-valuenow'), '25');
     assert.equal(await page.locator('#kelime-0').getAttribute('class'), 'word-button correct');
@@ -725,6 +777,8 @@ test('320px upload layout keeps the busy status, timer and server explanation in
     const originalScrollY = await page.evaluate(() => window.scrollY);
     await page.locator('#file-input').setInputFiles({ name: 'cokuzun-yapay-dosya-adi'.repeat(5) + '.pdf', mimeType: 'application/pdf', buffer: Buffer.from('synthetic mobile fixture') });
     await pending;
+    await expectNoLayout(page, 'progressContainer', 'progressText', 'uploadWaitHint');
+    await expectLaidOut(page, 'uploadFeedback', 'uploadProgress');
     let promptState = await viewState(page, ['uploadPrompt']);
     assertInViewport(promptState.elements.uploadPrompt, promptState, 'mobile upload status in the file picker');
     assert.match(await page.locator('#uploadPrompt').textContent(), /Dosya gönderiliyor.*Sunucudan yanıt bekleniyor/);
@@ -740,6 +794,8 @@ test('320px upload layout keeps the busy status, timer and server explanation in
     }
     release();
     await page.waitForFunction(() => document.getElementById('file-upload-area').getAttribute('aria-busy') === 'false');
+    await expectNoLayout(page, 'uploadProgress', 'uploadWaitHint');
+    await expectLaidOut(page, 'progressContainer', 'progressText');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.equal(await page.locator('#baslatBtn').isDisabled(), false);
 });

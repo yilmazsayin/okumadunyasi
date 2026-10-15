@@ -21,7 +21,7 @@
         @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-10px); } 100% { transform: translateY(0px); } }
         #file-upload-area p { font-size: 1.1em; color: #7f8c8d; font-weight: 700; }
         #file-input { display: none; }
-        .progress-container { width: 100%; background-color: #ecf0f1; border-radius: 20px; margin-top: 25px; height: 25px; display: none; box-shadow: inset 0 3px 6px rgba(0,0,0,0.1); }
+        .progress-container { width: 100%; background-color: #ecf0f1; border-radius: 20px; margin-top: 25px; height: 25px; overflow: hidden; box-shadow: inset 0 3px 6px rgba(0,0,0,0.1); }
         .progress-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #a8ff78 0%, #78ffd6 100%); border-radius: 20px; transition: width 0.5s ease-in-out; box-shadow: 0 3px 10px rgba(120, 255, 214, 0.5); }
         .font-controls { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 25px; margin-bottom: -15px; }
         .font-controls button { background-color: #ff9f1c; color: white; width: 45px; height: 45px; padding: 0; font-size: 22px; font-weight: 900; line-height: 45px; margin-top: 0; border-radius: 50%; box-shadow: 0 5px 0 #cc7a00; transition: all 0.1s; }
@@ -80,9 +80,10 @@
         #uploadFeedback[data-state="ready"] { border-color: #91cba9; background: #f0fff3; color: #245b37; }
         #uploadStatus { margin: 8px 0; font-weight: 800; line-height: 1.5; }
         #uploadFileInfo, #uploadElapsed, #uploadWaitHint { margin: 6px 0; font-size: 0.95em; line-height: 1.5; }
-        #uploadProgress { display: flex; align-items: center; gap: 10px; font-size: 0.95em; }
+        #uploadProgress { align-items: center; gap: 10px; font-size: 0.95em; }
+        #uploadProgress:not([hidden]) { display: flex; }
         #uploadProgress .loader { flex: 0 0 24px; width: 24px; height: 24px; border-width: 4px; }
-        .progress-container { display: block; overflow: hidden; }
+        .progress-container:not([hidden]) { display: block; }
         #progressText { color: #526269; margin: 10px 0 0; font-weight: 700; }
         .font-controls { flex-wrap: wrap; margin-bottom: 0; }
         .font-controls button { border: none; cursor: pointer; }
@@ -150,7 +151,7 @@
         <div id="file-upload-area" role="button" tabindex="0" aria-label="Okunacak Word veya PDF dosyasını seç" aria-describedby="uploadHint pdfHint" aria-disabled="false">
             <div class="upload-icon" aria-hidden="true"><i class="fas fa-magic"></i></div>
             <p id="uploadPrompt">Dosyayı buraya sürükleyin veya seçmek için tıklayın</p>
-            <p class="upload-hint" id="uploadHint">Word (.docx) veya PDF (.pdf); en fazla 10 MiB.</p>
+            <p class="upload-hint" id="uploadHint">Word (.docx) veya PDF (.pdf); en fazla 10 MB.</p>
             <p class="upload-hint" id="pdfHint">PDF dosyasında seçilebilir metin olmalı. Taranmış veya fotoğraf şeklindeki PDF'ler henüz desteklenmiyor.</p>
         </div>
         <input type="file" id="file-input" accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" aria-label="Okunacak Word veya PDF dosyası" hidden>
